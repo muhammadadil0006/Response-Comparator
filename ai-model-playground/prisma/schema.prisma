@@ -1,0 +1,77 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String         @id @default(uuid()) @db.Uuid
+  email         String         @unique @db.VarChar(255)
+  passwordHash  String         @map("password_hash") @db.VarChar(255)
+  firstName     String?        @map("first_name") @db.VarChar(100)
+  lastName      String?        @map("last_name") @db.VarChar(100)
+  isActive      Boolean        @default(true) @map("is_active")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  comparisons   Comparison[]
+  refreshTokens RefreshToken[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model Comparison {
+  id        String          @id @default(uuid()) @db.Uuid
+  userId    String?         @map("user_id") @db.Uuid
+  prompt    String          @db.Text
+  saved     Boolean         @default(false)
+  createdAt DateTime        @default(now()) @map("created_at")
+  updatedAt DateTime        @updatedAt @map("updated_at")
+  user      User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  responses ModelResponse[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, saved])
+  @@map("comparisons")
+}
+
+model ModelResponse {
+  id               String     @id @default(uuid()) @db.Uuid
+  comparisonId     String     @map("comparison_id") @db.Uuid
+  modelId          String     @map("model_id") @db.VarChar(50)
+  provider         String     @db.VarChar(50)
+  responseText     String?    @map("response_text") @db.Text
+  status           String     @db.VarChar(20)
+  errorMessage     String?    @map("error_message") @db.Text
+  responseTimeMs   Int?       @map("response_time_ms")
+  promptTokens     Int?       @map("prompt_tokens")
+  completionTokens Int?       @map("completion_tokens")
+  totalTokens      Int?       @map("total_tokens")
+  estimatedCost    Decimal?   @map("estimated_cost") @db.Decimal(10, 6)
+  createdAt        DateTime   @default(now()) @map("created_at")
+  comparison       Comparison @relation(fields: [comparisonId], references: [id], onDelete: Cascade)
+
+  @@unique([comparisonId, modelId])
+  @@index([comparisonId])
+  @@map("model_responses")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  tokenHash String   @unique @map("token_hash") @db.Text
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
