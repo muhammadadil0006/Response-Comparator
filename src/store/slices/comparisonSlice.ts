@@ -115,6 +115,23 @@ export const comparisonSlice = createSlice({
         state.models[modelId].responseText += chunk;
       }
     },
+    /**
+     * Batch update: sets the full accumulated responseText for multiple models
+     * in a single Redux mutation.  Used by the streaming flush loop to replace
+     * per-token appendChunk dispatches (potentially 100s/sec) with a single
+     * dispatch per animation frame (~60/sec), regardless of how many models
+     * are streaming simultaneously.
+     */
+    flushChunks: (
+      state,
+      action: PayloadAction<Array<{ modelId: string; text: string }>>
+    ) => {
+      for (const { modelId, text } of action.payload) {
+        if (state.models[modelId]) {
+          state.models[modelId].responseText = text;
+        }
+      }
+    },
     modelCompleted: (
       state,
       action: PayloadAction<{
@@ -267,6 +284,7 @@ export const {
   updateComparisonId,
   modelStarted,
   appendChunk,
+  flushChunks,
   modelCompleted,
   modelError,
   addToolCall,

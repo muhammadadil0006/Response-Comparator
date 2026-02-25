@@ -33,6 +33,38 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   provider,
   isStreaming = false,
 }: MarkdownRendererProps) {
+  // ── Streaming fast-path ───────────────────────────────────────────────────
+  // While the model is streaming, skip the O(n) tokenizer and full React
+  // VDOM reconciliation of complex token trees entirely.  Just render the raw
+  // text — this costs almost nothing compared to re-tokenizing + diffing
+  // hundreds of elements at 60 fps × 3 panels simultaneously.
+  // Once streaming completes (isStreaming flips to false), we fall through to
+  // the full markdown render below.
+  if (isStreaming) {
+    return (
+      <div className="markdown-body prose prose-sm max-w-none dark:prose-invert">
+        <pre
+          className="whitespace-pre-wrap wrap-break-word font-sans text-sm leading-relaxed text-[#E6EDF3]"
+          style={{ fontFamily: 'inherit' }}
+        >
+          {content}
+          <span className="inline-block h-4 w-1 animate-pulse bg-primary-500 ml-0.5 align-text-bottom" />
+        </pre>
+      </div>
+    );
+  }
+
+  // ── Completed / static render — full markdown ─────────────────────────────
+  return <MarkdownBody content={content} provider={provider} />;
+});
+
+const MarkdownBody = memo(function MarkdownBody({
+  content,
+  provider,
+}: {
+  content: string;
+  provider?: string;
+}) {
   const tokens = useMemo(() => tokenize(content), [content]);
 
   return (
@@ -40,9 +72,6 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
       {tokens.map((token, i) => (
         <TokenRenderer key={i} token={token} provider={provider} />
       ))}
-      {isStreaming && (
-        <span className="inline-block h-4 w-1 animate-pulse bg-primary-500 ml-0.5 align-text-bottom" />
-      )}
     </div>
   );
 });

@@ -4,12 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
 import { selectIsAuthenticated } from '@/store/slices/authSlice';
+import { KebabMenu, type KebabMenuItem } from '@/components/ui/KebabMenu';
 import {
   setPrompt,
   startComparison,
   updateComparisonId,
   modelStarted,
-  appendChunk,
+  flushChunks,
   modelCompleted,
   modelError,
   addToolCall,
@@ -47,17 +48,35 @@ function getProviderForModel(modelId: string): string {
 interface ComparisonContainerProps {
   /** When set, preloads this comparison ID from the URL (e.g. /compare/[id]) */
   initialComparisonId?: string;
+  /**
+   * Force the view into read-only mode regardless of ownership.
+   * Used by the /share/[id] route. When the owner opens a share link
+   * they are automatically redirected to /compare/[id] instead.
+   */
+  forceReadOnly?: boolean;
 }
 
-export function ComparisonContainer({ initialComparisonId }: ComparisonContainerProps = {}) {
+export function ComparisonContainer({ initialComparisonId, forceReadOnly = false }: ComparisonContainerProps = {}) {
   const dispatch = useAppDispatch();
   const router = useRouter();
   const isAuthenticated = useAppSelector(selectIsAuthenticated);
   const { isLoading, models, currentPrompt, comparisonId: currentComparisonId, syncScroll } = useAppSelector((state) => state.comparison);
   const lastPromptRef = useRef<string>('');
-  const abortControllerRef = useRef<AbortController | null>(null);
+  // Per-model abort controllers so individual regenerations never cancel each other.
+  // Key = modelId for single-model retries, '__all__' for full submissions.
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const initializedRef = useRef(false);
   const snapshotRestoredRef = useRef(false);
+  // ── Per-model streaming RAF flush ───────────────────────────────────────────
+  // Each model gets its own independent requestAnimationFrame handle so they
+  // never block or cancel each other.
+  //   • modelId → rAF handle (null when no frame is pending for that model)
+  //   • At most one pending frame per model → ~60 Redux dispatches/sec per
+  //     model instead of one per token (which can be 100s/sec)
+  const pendingRafsRef = useRef<Map<string, number>>(new Map());
+  // Stable ref to modelAccumulator so rAF callbacks always read the latest
+  // text without needing to be recreated.
+  const modelAccumulatorRef = useRef<Record<string, { provider: string; responseText: string; status: import('@/types/enums').ModelStatus; errorMessage?: string; metrics?: import('@/types/comparison').SSEDataPayload['metrics'] }>>({})
 
   // ── Persist in-flight state to localStorage on every models change ───────────
   // This is more reliable than beforeunload (which can be skipped by browsers).
@@ -112,6 +131,10 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
   }, []);
   const [promptDraft, setPromptDraft] = useState('');
   const [localHistory, setLocalHistory] = useState<Comparison[]>([]);
+  // IDs that have been deleted optimistically – filtered from chatHistory
+  // immediately so the item disappears from the sidebar before the RTK
+  // invalidation refetch clears it from authenticatedHistory.
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set());
   const [deleteComparison] = useDeleteComparisonMutation();
   const {
     data: authenticatedHistory,
@@ -142,6 +165,23 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
     lastPromptRef.current = initialComparison.prompt;
   }, [initialComparison, dispatch]);
 
+  // Read-only when:
+  //   a) Opened via /share/[id] (forceReadOnly) AND the user is not the owner, OR
+  //   b) Loaded from /compare/[id] and the server says they don't own it.
+  const isReadOnly =
+    (forceReadOnly && !!initialComparison && initialComparison.is_owner === false) ||
+    (!forceReadOnly && !!initialComparisonId && !!initialComparison && initialComparison.is_owner === false);
+
+  // On the /share/[id] route: if the viewer IS the owner, silently redirect
+  // them to their real, editable chat at /compare/[id].
+  useEffect(() => {
+    if (!forceReadOnly || !initialComparison) return;
+    if (initialComparison.is_owner === true) {
+      router.replace(`/compare/${initialComparison.comparison_id}`);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forceReadOnly, initialComparison]);
+
   useEffect(() => {
     if (isAuthenticated) return;
 
@@ -164,22 +204,28 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
   }, [isAuthenticated]);
 
   const chatHistory = useMemo(() => {
+    let base: Comparison[];
     if (!isAuthenticated) {
-      return localHistory;
+      base = localHistory;
+    } else {
+      const combined = [...localHistory, ...(authenticatedHistory?.comparisons || [])];
+      const seen = new Set<string>();
+      const deduplicated: Comparison[] = [];
+
+      for (const chat of combined) {
+        if (seen.has(chat.comparison_id)) continue;
+        seen.add(chat.comparison_id);
+        deduplicated.push(chat);
+      }
+
+      base = deduplicated.slice(0, 20);
     }
-
-    const combined = [...localHistory, ...(authenticatedHistory?.comparisons || [])];
-    const seen = new Set<string>();
-    const deduplicated: Comparison[] = [];
-
-    for (const chat of combined) {
-      if (seen.has(chat.comparison_id)) continue;
-      seen.add(chat.comparison_id);
-      deduplicated.push(chat);
-    }
-
-    return deduplicated.slice(0, 20);
-  }, [authenticatedHistory?.comparisons, isAuthenticated, localHistory]);
+    // Optimistically hide items that are in the process of being deleted
+    // (before the RTK invalidation refetch has a chance to remove them)
+    return deletedIds.size > 0
+      ? base.filter((c) => !deletedIds.has(c.comparison_id))
+      : base;
+  }, [authenticatedHistory?.comparisons, isAuthenticated, localHistory, deletedIds]);
 
   const handleNewChat = useCallback(() => {
     dispatch(resetComparison());
@@ -220,7 +266,13 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
       dispatch(setPrompt(prompt));
       let selectedModels = modelIds;
       let completedComparisonId = existingComparisonId || `local-${Date.now()}`;
-      let modelAccumulator = selectedModels.reduce<
+
+      // Build the local accumulator for this invocation's models.
+      // For retries: merge into the EXISTING shared ref so other models'
+      // in-flight RAF callbacks continue to find their text — only reset
+      // the retried model's entry.
+      // For full submissions: replace entirely (new prompt = fresh state).
+      const freshEntries = selectedModels.reduce<
         Record<
           string,
           {
@@ -240,6 +292,17 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
         return accumulator;
       }, {});
 
+      let modelAccumulator: typeof freshEntries;
+      if (options?.isRetry) {
+        // Merge: keep all existing model data, only reset the retried model.
+        modelAccumulatorRef.current = { ...modelAccumulatorRef.current, ...freshEntries };
+        modelAccumulator = modelAccumulatorRef.current;
+      } else {
+        // Full submission — replace everything.
+        modelAccumulator = freshEntries;
+        modelAccumulatorRef.current = modelAccumulator;
+      }
+
       if (options?.isRetry) {
         selectedModels.forEach((modelId) => {
           dispatch(resetModelForRetry({ modelId }));
@@ -253,18 +316,22 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
         );
       }
 
-      // Abort any in-flight request before starting a new one.
-      // For single-model retries, keep the original stream alive so other
-      // panels continue rendering; only abort on full new-prompt submissions.
-      if (!options?.isRetry) {
-        if (abortControllerRef.current) {
-          abortControllerRef.current.abort('superseded');
-        }
+      // For a full new-prompt submission: abort ALL in-flight streams (full + any
+      // per-model retries) so nothing from the old prompt leaks into the new one.
+      // For a single-model retry: abort ONLY that model's previous stream so other
+      // models (whether streaming or already done) are completely unaffected.
+      const abortKey = options?.isRetry ? selectedModels[0] : '__all__';
+      if (options?.isRetry) {
+        // Only cancel the specific model being retried.
+        abortControllersRef.current.get(selectedModels[0])?.abort('superseded');
+        abortControllersRef.current.delete(selectedModels[0]);
+      } else {
+        // New prompt — cancel everything.
+        abortControllersRef.current.forEach((ctrl) => ctrl.abort('superseded'));
+        abortControllersRef.current.clear();
       }
       const abortController = new AbortController();
-      if (!options?.isRetry) {
-        abortControllerRef.current = abortController;
-      }
+      abortControllersRef.current.set(abortKey, abortController);
 
       let wasSuperseded = false;
 
@@ -337,17 +404,26 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
                       // Backend sends resolved model IDs (e.g. "openai/gpt-4o")
                       const resolvedModels = data.models || selectedModels;
                       selectedModels = resolvedModels;
-                      // Rebuild accumulator with resolved keys
-                      modelAccumulator = resolvedModels.reduce<
-                        typeof modelAccumulator
-                      >((acc, mId) => {
-                        acc[mId] = {
-                          provider: getProviderForModel(mId),
-                          responseText: '',
-                          status: ModelStatus.IDLE,
-                        };
-                        return acc;
-                      }, {});
+                      // Build fresh entries for only the models in this stream.
+                      const resolvedEntries = resolvedModels.reduce<typeof modelAccumulator>(
+                        (acc, mId) => {
+                          acc[mId] = {
+                            provider: getProviderForModel(mId),
+                            responseText: '',
+                            status: ModelStatus.IDLE,
+                          };
+                          return acc;
+                        },
+                        {}
+                      );
+                      if (options?.isRetry) {
+                        // Merge — keep other models' accumulated text intact
+                        // so their in-flight RAF callbacks are unaffected.
+                        modelAccumulatorRef.current = { ...modelAccumulatorRef.current, ...resolvedEntries };
+                      } else {
+                        modelAccumulatorRef.current = resolvedEntries;
+                      }
+                      modelAccumulator = modelAccumulatorRef.current;
                       // Use updateComparisonId to set the real ID without
                       // wiping the models record. The initial startComparison
                       // call (before fetch) already set up all model entries.
@@ -356,19 +432,18 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
                           comparisonId: data.comparisonId,
                         })
                       );
-                      // Ensure model entries exist for any newly-resolved IDs
-                      // (defensive — handles ID mismatch between pre-fetch
-                      // and backend-resolved model IDs)
-                      if (!options?.isRetry) {
-                        resolvedModels.forEach((mId: string) => {
-                          dispatch(
-                            modelStarted({
-                              modelId: mId,
-                              provider: getProviderForModel(mId),
-                            })
-                          );
-                        });
-                      }
+                      // Ensure all resolved model entries exist and are in
+                      // STREAMING state before chunks arrive.  This applies
+                      // to both new generations AND retries so the streaming
+                      // animation starts at the same point in both cases.
+                      resolvedModels.forEach((mId: string) => {
+                        dispatch(
+                          modelStarted({
+                            modelId: mId,
+                            provider: getProviderForModel(mId),
+                          })
+                        );
+                      });
                     }
                     break;
                   case SSEEventType.MODEL_STARTED:
@@ -388,24 +463,32 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
                       })
                     );
                     break;
-                  case SSEEventType.MODEL_CHUNK:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
+                  case SSEEventType.MODEL_CHUNK: {
+                    const chunkModelId = data.modelId!;
+                    modelAccumulator[chunkModelId] = {
+                      ...(modelAccumulator[chunkModelId] || {
+                        provider: getProviderForModel(chunkModelId),
                         responseText: '',
                         status: ModelStatus.IDLE,
                       }),
                       responseText:
-                        (modelAccumulator[data.modelId!]?.responseText || '') + data.chunk!,
+                        (modelAccumulator[chunkModelId]?.responseText || '') + data.chunk!,
                       status: ModelStatus.STREAMING,
                     };
-                    dispatch(
-                      appendChunk({
-                        modelId: data.modelId!,
-                        chunk: data.chunk!,
-                      })
-                    );
+                    // Schedule one RAF per model independently.
+                    // If this model already has a frame pending, the new chunk
+                    // is already in modelAccumulator and will be picked up when
+                    // that frame fires — no extra dispatch needed.
+                    if (!pendingRafsRef.current.has(chunkModelId)) {
+                      const rafId = requestAnimationFrame(() => {
+                        pendingRafsRef.current.delete(chunkModelId);
+                        const text = modelAccumulatorRef.current[chunkModelId]?.responseText ?? '';
+                        dispatch(flushChunks([{ modelId: chunkModelId, text }]));
+                      });
+                      pendingRafsRef.current.set(chunkModelId, rafId);
+                    }
                     break;
+                  }
                   case SSEEventType.MODEL_TOOL_CALL:
                     if (data.toolCall) {
                       dispatch(
@@ -416,42 +499,61 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
                       );
                     }
                     break;
-                  case SSEEventType.MODEL_COMPLETED:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
+                  case SSEEventType.MODEL_COMPLETED: {
+                    const completedModelId = data.modelId!;
+                    modelAccumulator[completedModelId] = {
+                      ...(modelAccumulator[completedModelId] || {
+                        provider: getProviderForModel(completedModelId),
                         responseText: '',
                         status: ModelStatus.IDLE,
                       }),
                       status: ModelStatus.COMPLETED,
                       metrics: data.metrics,
                     };
+                    // Cancel only THIS model's RAF and flush its final text.
+                    // Other models' RAFs are completely unaffected.
+                    const completedRaf = pendingRafsRef.current.get(completedModelId);
+                    if (completedRaf !== undefined) {
+                      cancelAnimationFrame(completedRaf);
+                      pendingRafsRef.current.delete(completedModelId);
+                    }
+                    dispatch(flushChunks([{ modelId: completedModelId, text: modelAccumulator[completedModelId]?.responseText || '' }]));
                     dispatch(
                       modelCompleted({
-                        modelId: data.modelId!,
+                        modelId: completedModelId,
                         metrics: data.metrics ?? null,
                         finishReason: data.finishReason,
                       })
                     );
                     break;
-                  case SSEEventType.MODEL_ERROR:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
+                  }
+                  case SSEEventType.MODEL_ERROR: {
+                    const errorModelId = data.modelId!;
+                    modelAccumulator[errorModelId] = {
+                      ...(modelAccumulator[errorModelId] || {
+                        provider: getProviderForModel(errorModelId),
                         responseText: '',
                         status: ModelStatus.IDLE,
                       }),
                       status: ModelStatus.ERROR,
                       errorMessage: extractErrorMessage(data.error, 'Unexpected error'),
                     };
+                    // Cancel only this model's RAF — others keep running.
+                    const errorRaf = pendingRafsRef.current.get(errorModelId);
+                    if (errorRaf !== undefined) {
+                      cancelAnimationFrame(errorRaf);
+                      pendingRafsRef.current.delete(errorModelId);
+                    }
+                    dispatch(flushChunks([{ modelId: errorModelId, text: modelAccumulator[errorModelId]?.responseText || '' }]));
                     dispatch(
                       modelError({
-                        modelId: data.modelId!,
+                        modelId: errorModelId,
                         error: extractErrorMessage(data.error, 'Unexpected error'),
                         category: data.category,
                       })
                     );
                     break;
+                  }
                   case SSEEventType.ERROR:
                     selectedModels.forEach((modelId) => {
                       modelAccumulator[modelId] = {
@@ -510,22 +612,25 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
           });
         }
       } finally {
+        // Remove this stream's controller from the map now that it's done.
+        abortControllersRef.current.delete(abortKey);
+
         if (wasSuperseded) return; // new submission took over — skip cleanup
 
-        // For single-model retries the original multi-model stream owns isLoading;
-        // calling comparisonCompleted() here would prematurely unset it while
-        // the other panels are still streaming.
-        if (!options?.isRetry) {
-          dispatch(comparisonCompleted());
+        // Always mark the comparison as completed so isLoading is reset
+        // correctly — this is safe for both full generations and retries since
+        // each stream has its own AbortController now.
+        dispatch(comparisonCompleted());
 
-          // Update the URL to reflect the saved comparison (skip local/anon drafts)
-          if (
-            completedComparisonId &&
-            !completedComparisonId.startsWith('local-') &&
-            !completedComparisonId.startsWith('anon-')
-          ) {
-            router.replace(`/compare/${completedComparisonId}`);
-          }
+        // Update the URL to reflect the saved comparison (skip local/anon drafts
+        // and skip retries — the URL is already correct for a retry).
+        if (
+          !options?.isRetry &&
+          completedComparisonId &&
+          !completedComparisonId.startsWith('local-') &&
+          !completedComparisonId.startsWith('anon-')
+        ) {
+          router.replace(`/compare/${completedComparisonId}`);
         }
 
         // Build the completed comparison object for local history
@@ -632,14 +737,13 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
 
   const handleRetry = useCallback((modelId: string) => {
     const prompt = lastPromptRef.current || currentPrompt;
-    if (prompt) {
-      // Never pass 'pending' — it's a placeholder set before the server assigns a real UUID
-      const safeComparisonId =
-        currentComparisonId && currentComparisonId !== 'pending'
-          ? currentComparisonId
-          : undefined;
-      handleSubmit(prompt, [modelId], { isRetry: true, comparisonId: safeComparisonId });
-    }
+    if (!prompt) return;
+    // Regenerate only the clicked model — other panels stay untouched.
+    const safeComparisonId =
+      currentComparisonId && currentComparisonId !== 'pending'
+        ? currentComparisonId
+        : undefined;
+    handleSubmit(prompt, [modelId], { isRetry: true, comparisonId: safeComparisonId });
   }, [handleSubmit, currentPrompt, currentComparisonId]);
 
   const handleEditPrompt = useCallback((text: string) => {
@@ -647,29 +751,53 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
   }, []);
 
   const handleDeleteChat = useCallback(async (comparisonId: string) => {
-    // Remove from local history
+    // ── 1. Optimistic removal ─────────────────────────────────────────────────
+    // Mark as deleted immediately so the sidebar hides it before the server
+    // call and RTK refetch have a chance to settle.
+    setDeletedIds((prev) => new Set(prev).add(comparisonId));
     setLocalHistory((previous) => {
       const updated = previous.filter((c) => c.comparison_id !== comparisonId);
       persistLocalHistory(updated);
       return updated;
     });
 
-    // Delete from server if authenticated
+    // ── 2. Server delete ──────────────────────────────────────────────────────
     if (isAuthenticated) {
       try {
         await deleteComparison(comparisonId).unwrap();
+        // RTK invalidation triggers a refetch of authenticatedHistory;
+        // once that arrives the ID is naturally absent, so unmark it.
+        setDeletedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(comparisonId);
+          return next;
+        });
       } catch {
-        // Ignore — already removed locally
+        // Server delete failed — restore the item by removing from deletedIds
+        setDeletedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(comparisonId);
+          return next;
+        });
       }
     }
 
-    // If the deleted chat is the active one, reset
-    if (currentComparisonId === comparisonId) {
+    // ── 3. Clear active state + navigate away if this was the open chat ───────
+    // Check both the Redux comparisonId and the URL-level initialComparisonId so
+    // that delete works whether the user is on /compare/<id> or just in the sidebar.
+    const isActivelySeen =
+      currentComparisonId === comparisonId ||
+      initialComparisonId === comparisonId;
+
+    if (isActivelySeen) {
       dispatch(resetComparison());
       setPromptDraft('');
       lastPromptRef.current = '';
+      // Navigate to /compare (no ID) to clear the URL so the deleted
+      // comparison is never attempted to be fetched again.
+      router.push('/compare');
     }
-  }, [isAuthenticated, deleteComparison, currentComparisonId, dispatch]);
+  }, [isAuthenticated, deleteComparison, currentComparisonId, initialComparisonId, dispatch, router]);
 
   const persistLocalHistory = (history: Comparison[]) => {
     if (isAuthenticated) return;
@@ -679,6 +807,27 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
       // Ignore
     }
   };
+
+  // ── Share helpers ────────────────────────────────────────────────────────────
+  const [activeCopiedId, setActiveCopiedId] = useState<string | null>(null);
+
+  const handleShareChat = useCallback((comparisonId: string) => {
+    if (comparisonId.startsWith('anon-') || comparisonId === 'pending') {
+      alert('Sign in to save and share this comparison.');
+      return;
+    }
+    try {
+      // Always use the /share/<id> route so recipients always get the
+      // read-only view. Owners who open this link are redirected to
+      // /compare/<id> automatically by the share page.
+      const url = `${window.location.origin}/share/${comparisonId}`;
+      navigator.clipboard.writeText(url);
+      setActiveCopiedId(comparisonId);
+      setTimeout(() => setActiveCopiedId(null), 1500);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   return (
     <div className="grid h-[calc(100vh-8rem)] grid-cols-1 lg:grid-cols-[260px_1fr]">
@@ -723,16 +872,45 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
                       {new Date(chat.created_at).toLocaleString()}
                     </p>
                   </button>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); handleDeleteChat(chat.comparison_id); }}
-                    title="Delete chat"
-                    className="mr-2 shrink-0 rounded-md p-1 text-[#8B949E]/40 opacity-0 transition-all hover:bg-[#F85149]/10 hover:text-[#F85149] group-hover:opacity-100"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
-                      <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.519.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.34.06a.75.75 0 1 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
-                    </svg>
-                  </button>
+                  {/* Kebab menu — only visible on hover via group-hover */}
+                  <div className="mr-1 opacity-0 transition-opacity group-hover:opacity-100">
+                    <KebabMenu
+                      align="right"
+                      triggerClassName="flex h-6 w-6 items-center justify-center rounded-md text-[#8B949E]/50 transition-colors hover:bg-[#1C2128] hover:text-[#F0F6FC]"
+                      items={[
+                        {
+                          label: 'Open',
+                          icon: (
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                              <path d="M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" />
+                              <path fillRule="evenodd" d="M.664 10.59a1.651 1.651 0 0 1 0-1.186A10.004 10.004 0 0 1 10 3c4.257 0 7.893 2.66 9.336 6.41.147.381.146.804 0 1.186A10.004 10.004 0 0 1 10 17c-4.257 0-7.893-2.66-9.336-6.41ZM14 10a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" clipRule="evenodd" />
+                            </svg>
+                          ),
+                          onClick: () => openChat(chat),
+                        },
+                        {
+                          label: activeCopiedId === chat.comparison_id ? 'Copied!' : 'Copy link',
+                          icon: (
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                              <path d="M12.232 4.232a2.5 2.5 0 0 1 3.536 3.536l-1.225 1.224a.75.75 0 0 0 1.061 1.06l1.224-1.224a4 4 0 0 0-5.656-5.656l-3 3a4 4 0 0 0 .225 5.865.75.75 0 0 0 .977-1.138 2.5 2.5 0 0 1-.142-3.667l3-3Z" />
+                              <path d="M11.603 7.963a.75.75 0 0 0-.977 1.138 2.5 2.5 0 0 1 .142 3.667l-3 3a2.5 2.5 0 0 1-3.536-3.536l1.225-1.224a.75.75 0 0 0-1.061-1.06l-1.224 1.224a4 4 0 1 0 5.656 5.656l3-3a4 4 0 0 0-.225-5.865Z" />
+                            </svg>
+                          ),
+                          onClick: () => handleShareChat(chat.comparison_id),
+                        },
+                        {
+                          label: 'Delete',
+                          icon: (
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                              <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.519.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.34.06a.75.75 0 1 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
+                            </svg>
+                          ),
+                          onClick: () => handleDeleteChat(chat.comparison_id),
+                          variant: 'danger',
+                        },
+                      ] satisfies KebabMenuItem[]}
+                    />
+                  </div>
                 </div>
               );
             })
@@ -742,6 +920,23 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
 
       {/* ── Main area ───────────────────────────────────────── */}
       <section className="relative flex flex-col overflow-hidden">
+        {/* ── Read-only banner (shared view) ─────────────────── */}
+        {isReadOnly && (
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-300/30 bg-amber-950/40 px-4 py-2.5 text-xs text-amber-300">
+            <div className="flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5 shrink-0">
+                <path fillRule="evenodd" d="M10 1a4.5 4.5 0 0 0-4.5 4.5V9H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-.5V5.5A4.5 4.5 0 0 0 10 1Zm3 8V5.5a3 3 0 1 0-6 0V9h6Z" clipRule="evenodd" />
+              </svg>
+              <span>
+                <span className="font-semibold">Read-only</span>
+                {" — this is a shared copy of someone\u2019s conversation. "}
+                Messaging is disabled.
+              </span>
+            </div>
+            <ReadOnlyCopyButton shareId={initialComparisonId!} />
+          </div>
+        )}
+
         {Object.keys(models).length === 0 ? (
           /* Welcome screen */
           <div className="flex flex-1 items-center justify-center">
@@ -768,19 +963,20 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
           </div>
         ) : (
           /* Chat content */
-          <div className="flex-1 overflow-y-auto px-4 py-4 pb-48 sm:px-6">
+          <div className={`flex-1 overflow-y-auto px-4 py-4 sm:px-6 ${isReadOnly ? 'pb-4' : 'pb-48'}`}>
             <ComparisonView
               models={models}
               currentPrompt={currentPrompt}
               syncScroll={syncScroll}
-              onRetry={handleRetry}
-              onRegenerate={handleRetry}
-              onEditPrompt={handleEditPrompt}
+              onRetry={isReadOnly ? undefined : handleRetry}
+              onRegenerate={isReadOnly ? undefined : handleRetry}
+              onEditPrompt={isReadOnly ? undefined : handleEditPrompt}
             />
           </div>
         )}
 
-        {/* Sticky bottom bar */}
+        {/* Sticky bottom bar — hidden in read-only shared view */}
+        {!isReadOnly && (
         <div className="absolute inset-x-0 bottom-0 z-20 border-t border-[#30363D] bg-[#0B0F17]/90 backdrop-blur-md">
           <div className="mx-auto max-w-4xl px-4 py-3 sm:px-6">
             <div className="mb-2 flex items-center justify-between">
@@ -811,7 +1007,40 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
             />
           </div>
         </div>
+        )}
       </section>
     </div>
+  );
+}
+
+// ── ReadOnlyCopyButton ──────────────────────────────────────────────────────────────
+
+/**
+ * Small copy-button that lives inside the read-only banner.
+ * Copies the canonical /share/<id> URL regardless of the current
+ * URL so the recipient always gets the shareable link.
+ */
+function ReadOnlyCopyButton({ shareId }: { shareId: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      const url = `${window.location.origin}/share/${shareId}`;
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // ignore
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      className="shrink-0 rounded px-2 py-0.5 font-medium transition-colors hover:bg-amber-800/40"
+    >
+      {copied ? '✓ Copied!' : 'Copy link'}
+    </button>
   );
 }

@@ -24,15 +24,16 @@ export async function GET(
       );
     }
 
-    // Check access: only owner can view saved comparisons
-    if (comparison.saved && comparison.userId !== userId) {
-      return NextResponse.json(
-        { error: 'Access denied' },
-        { status: HttpStatus.FORBIDDEN }
-      );
-    }
+    // Comparisons are publicly readable by anyone who knows the UUID.
+    // The ID acts as an opaque share token. Write operations (DELETE, etc.)
+    // still enforce ownership below.
 
     return NextResponse.json({
+      // is_owner is strictly true only when the request is from the
+      // authenticated user who created the comparison. Comparisons
+      // created without an account (userId === null) have no owner,
+      // so they are never redirected to an editable view.
+      is_owner: userId !== null && comparison.userId === userId,
       comparison_id: comparison.id,
       user_id: comparison.userId,
       prompt: comparison.prompt,

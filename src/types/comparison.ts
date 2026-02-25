@@ -22,6 +22,8 @@ export interface ModelResponseData {
 export interface Comparison {
   comparison_id: string;
   user_id: string | null;
+  /** True when the requesting user is the owner (or the comparison is anonymous). */
+  is_owner?: boolean;
   prompt: string;
   saved: boolean;
   created_at: string;

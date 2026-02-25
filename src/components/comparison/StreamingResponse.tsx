@@ -4,6 +4,18 @@ import { useRef, useEffect, useCallback } from 'react';
 import { MarkdownRenderer } from '@/components/comparison/MarkdownRenderer';
 import { ToolCallBlock } from '@/components/comparison/ToolCallBlock';
 
+// ─── Scroll behaviour ─────────────────────────────────────────────────────────
+//
+// Auto-scroll during streaming must NOT propagate to neighboring panels via the
+// sync-scroll handler.  We guard against it with `isAutoScrollingRef`.
+//
+// CSS rules that matter:
+//   scroll-behavior: auto   → no CSS smooth-scroll (avoids double-animation lag)
+//   overscroll-behavior-y: contain → prevents the page from scrolling when the
+//                                    panel reaches its edge
+// These are applied as inline styles below.
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface ToolCallData {
   id: string;
   name: string;
@@ -30,6 +42,10 @@ export function StreamingResponse({
   onScroll,
 }: StreamingResponseProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // True while we are programmatically setting scrollTop during streaming
+  // auto-scroll — prevents the synthetic scroll event from triggering the
+  // ratio-based sync-scroll logic and causing panels to fight each other.
+  const isAutoScrollingRef = useRef(false);
 
   const setRef = useCallback(
     (el: HTMLDivElement | null) => {
@@ -41,9 +57,26 @@ export function StreamingResponse({
 
   useEffect(() => {
     if (isStreaming && containerRef.current) {
+      // Mark the upcoming scroll as automatic so the onScroll guard
+      // suppresses it from propagating to the sync-scroll handler.
+      isAutoScrollingRef.current = true;
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
+      // Reset the flag after the browser's next paint so any residual scroll
+      // event that still fires during this frame gets swallowed.
+      requestAnimationFrame(() => {
+        isAutoScrollingRef.current = false;
+      });
     }
   }, [text, isStreaming]);
+
+  const handleScroll = useCallback(() => {
+    // Only forward the event to the sync handler when the user actually
+    // scrolled — not when we programmatically moved the scrollbar during
+    // streaming auto-scroll.
+    if (!isAutoScrollingRef.current) {
+      onScroll?.();
+    }
+  }, [onScroll]);
 
   const showFinishIndicator =
     !isStreaming &&
@@ -54,8 +87,11 @@ export function StreamingResponse({
   return (
     <div
       ref={setRef}
-      onScroll={onScroll}
-      className="min-h-50 max-h-125 overflow-y-auto"
+      onScroll={handleScroll}
+      className="min-h-50 max-h-125 overflow-y-auto overscroll-y-contain"
+      // scroll-behavior: auto prevents CSS smooth-scroll which would cause
+      // double-animation jitter when syncing panels programmatically.
+      style={{ scrollBehavior: 'auto' }}
     >
       {/* Tool call blocks (if model invoked tools) */}
       {toolCalls && toolCalls.length > 0 && (
