@@ -6,9 +6,8 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")   // prisma:// Accelerate URL — used by the runtime client
-  directUrl = env("POSTGRES_URL")  // direct postgresql:// URL — used only by Prisma CLI (migrations)
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model User {

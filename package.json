@@ -13,8 +13,8 @@
   },
   "dependencies": {
     "@ai-sdk/gateway": "^1.0.0",
+    "@prisma/adapter-pg": "^6.19.2",
     "@prisma/client": "^6.19.2",
-    "@prisma/extension-accelerate": "^1.0.0",
     "@reduxjs/toolkit": "^2.11.2",
     "@vercel/functions": "^2.0.0",
     "ai": "^5.0.0",
