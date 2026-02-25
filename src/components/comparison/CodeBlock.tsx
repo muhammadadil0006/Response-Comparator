@@ -38,7 +38,7 @@ export function CodeBlock({ language, code, provider }: CodeBlockProps) {
   const headerAccent = getHeaderAccent(provider);
 
   return (
-    <div className="code-block group my-3 overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700">
+    <div className="code-block group my-3 overflow-hidden rounded-lg border border-[#30363D]">
       {/* Header bar with language + copy */}
       <div
         className="flex items-center justify-between px-4 py-1.5 text-xs"

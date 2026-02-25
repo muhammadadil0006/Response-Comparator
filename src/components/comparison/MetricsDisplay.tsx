@@ -19,7 +19,7 @@ export const MetricsDisplay = memo(function MetricsDisplay({
 
   if (!metrics) {
     return (
-      <div className="grid grid-cols-2 gap-2 text-xs text-gray-400">
+      <div className="grid grid-cols-2 gap-2 text-xs text-[#8B949E]/50">
         <div>Response time: --</div>
         <div>Cost: --</div>
         <div>Prompt tokens: --</div>
@@ -43,32 +43,32 @@ export const MetricsDisplay = memo(function MetricsDisplay({
   return (
     <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
       <div className="flex justify-between">
-        <span className="text-gray-500 dark:text-gray-400">Time:</span>
-        <span className="font-mono font-medium text-gray-700 dark:text-gray-300">
+        <span className="text-[#8B949E]">Time:</span>
+        <span className="font-mono font-medium text-[#F0F6FC]/80">
           {formattedTime}
         </span>
       </div>
       <div className="flex justify-between">
-        <span className="text-gray-500 dark:text-gray-400">Cost:</span>
-        <span className="font-mono font-medium text-gray-700 dark:text-gray-300">
+        <span className="text-[#8B949E]">Cost:</span>
+        <span className="font-mono font-medium text-[#F0F6FC]/80">
           {formattedCost}
         </span>
       </div>
       <div className="flex justify-between">
-        <span className="text-gray-500 dark:text-gray-400">Prompt:</span>
-        <span className="font-mono font-medium text-gray-700 dark:text-gray-300">
+        <span className="text-[#8B949E]">Prompt:</span>
+        <span className="font-mono font-medium text-[#F0F6FC]/80">
           {metrics?.prompt_tokens?.toLocaleString() || '--'}
         </span>
       </div>
       <div className="flex justify-between">
-        <span className="text-gray-500 dark:text-gray-400">Completion:</span>
-        <span className="font-mono font-medium text-gray-700 dark:text-gray-300">
+        <span className="text-[#8B949E]">Completion:</span>
+        <span className="font-mono font-medium text-[#F0F6FC]/80">
           {metrics?.completion_tokens?.toLocaleString() || '--'}
         </span>
       </div>
-      <div className="col-span-2 flex justify-between border-t border-gray-100 pt-1 dark:border-gray-700">
-        <span className="text-gray-500 dark:text-gray-400">Total tokens:</span>
-        <span className="font-mono font-medium text-gray-700 dark:text-gray-300">
+      <div className="col-span-2 flex justify-between border-t border-[#30363D] pt-1">
+        <span className="text-[#8B949E]">Total tokens:</span>
+        <span className="font-mono font-medium text-[#F0F6FC]/80">
           {metrics?.total_tokens?.toLocaleString() || '--'}
         </span>
       </div>

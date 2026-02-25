@@ -24,7 +24,7 @@ export function ToolCallBlock({ id, name, args, provider }: ToolCallBlockProps) 
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
+        className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm transition-colors hover:bg-[#1C2128]"
         style={{ background: accent.headerBg }}
       >
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4" style={{ color: accent.icon }}>
@@ -33,12 +33,12 @@ export function ToolCallBlock({ id, name, args, provider }: ToolCallBlockProps) 
         <span className="font-mono font-medium" style={{ color: accent.text }}>
           {name}()
         </span>
-        <span className="ml-auto text-xs text-gray-400">{expanded ? '▲' : '▼'}</span>
+        <span className="ml-auto text-xs text-[#8B949E]">{expanded ? '▲' : '▼'}</span>
       </button>
 
       {expanded && (
-        <div className="border-t border-gray-100 dark:border-gray-700">
-          <div className="bg-gray-50 px-4 py-1 text-[10px] text-gray-400 dark:bg-gray-900">
+        <div className="border-t border-[#30363D]">
+          <div className="bg-[#1C2128] px-4 py-1 text-[10px] text-[#8B949E]">
             Call ID: {id}
           </div>
           <pre className="overflow-x-auto bg-gray-950 p-4 text-xs text-gray-300">
@@ -53,12 +53,12 @@ export function ToolCallBlock({ id, name, args, provider }: ToolCallBlockProps) 
 function getProviderAccent(provider?: string) {
   switch (provider) {
     case 'openai':
-      return { headerBg: '#f0fdf4', border: '#10a37f40', icon: '#10a37f', text: '#15803d' };
+      return { headerBg: '#10A37F10', border: '#10A37F40', icon: '#10A37F', text: '#10A37F' };
     case 'anthropic':
-      return { headerBg: '#fef3e2', border: '#d4a57440', icon: '#d4a574', text: '#92400e' };
+      return { headerBg: '#D9775710', border: '#D9775740', icon: '#D97757', text: '#D97757' };
     case 'xai':
-      return { headerBg: '#eff6ff', border: '#1da1f240', icon: '#1da1f2', text: '#1e40af' };
+      return { headerBg: '#E5E7EB10', border: '#E5E7EB30', icon: '#E5E7EB', text: '#E5E7EB' };
     default:
-      return { headerBg: '#f9fafb', border: '#e5e7eb', icon: '#6b7280', text: '#374151' };
+      return { headerBg: '#1C2128', border: '#30363D', icon: '#8B949E', text: '#8B949E' };
   }
 }

@@ -5,8 +5,8 @@ export default function HistoryLoading() {
     <div className="flex min-h-[50vh] items-center justify-center">
       <div className="text-center">
         <Spinner size="lg" />
-        <p className="mt-4 text-gray-600 dark:text-gray-400">
-          Loading comparison history...
+        <p className="mt-4 text-sm text-[#8B949E] animate-pulse">
+          Loading comparison history…
         </p>
       </div>
     </div>

@@ -108,8 +108,8 @@ export function RegisterForm() {
       />
 
       {error && (
-        <div className="rounded-md bg-red-50 p-3 dark:bg-red-900/20">
-          <p className="text-sm text-red-700 dark:text-red-400">{error}</p>
+        <div className="rounded-lg border border-[#F85149]/30 bg-[#F85149]/10 p-3">
+          <p className="text-sm text-[#F85149]">{error}</p>
         </div>
       )}
 
@@ -117,11 +117,11 @@ export function RegisterForm() {
         {isLoading ? 'Creating account...' : 'Create Account'}
       </Button>
 
-      <p className="text-center text-sm text-gray-600 dark:text-gray-400">
+      <p className="text-center text-sm text-[#8B949E]">
         Already have an account?{' '}
         <Link
           href="/login"
-          className="font-medium text-primary-600 hover:text-primary-500"
+          className="font-medium text-primary-400 hover:text-primary-300 transition-colors"
         >
           Sign in
         </Link>

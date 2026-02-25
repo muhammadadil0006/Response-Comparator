@@ -84,7 +84,7 @@ export function PromptInput({
 
   return (
     <form onSubmit={handleSubmit} className="w-full">
-      <div className="relative flex items-end rounded-2xl border border-gray-300 bg-white shadow-sm transition-colors focus-within:border-primary-500 focus-within:ring-2 focus-within:ring-primary-500/20 dark:border-gray-600 dark:bg-gray-800">
+      <div className="relative flex items-end rounded-2xl border border-[#30363D] bg-[#161B22] shadow-card transition-all duration-200 focus-within:border-primary-500/60 focus-within:ring-2 focus-within:ring-primary-500/15 focus-within:shadow-glow-sm">
         <textarea
           ref={textareaRef}
           value={prompt}
@@ -97,7 +97,7 @@ export function PromptInput({
           disabled={disabled || isLoading}
           rows={1}
           maxLength={10000}
-          className="max-h-50 min-h-11 flex-1 resize-none bg-transparent px-4 py-3 text-sm leading-relaxed text-gray-900 placeholder:text-gray-400 focus:outline-none disabled:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500"
+          className="max-h-50 min-h-11 flex-1 resize-none bg-transparent px-4 py-3 text-sm leading-relaxed text-[#F0F6FC] placeholder:text-[#8B949E]/60 focus:outline-none disabled:text-[#8B949E]"
         />
         <input
           ref={fileInputRef}
@@ -122,7 +122,7 @@ export function PromptInput({
           <button
             type="button"
             onClick={openFilePicker}
-            className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+            className="rounded-lg p-2 text-[#8B949E] transition-colors hover:bg-[#1C2128] hover:text-[#F0F6FC]"
             title="Upload file"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
@@ -132,7 +132,7 @@ export function PromptInput({
           <button
             type="button"
             onClick={openImagePicker}
-            className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+            className="rounded-lg p-2 text-[#8B949E] transition-colors hover:bg-[#1C2128] hover:text-[#F0F6FC]"
             title="Upload image"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
@@ -142,7 +142,7 @@ export function PromptInput({
           <button
             type="submit"
             disabled={!prompt.trim() || isLoading || disabled}
-            className="ml-1 rounded-lg bg-primary-600 p-2 text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-primary-500 dark:hover:bg-primary-600"
+            className="ml-1 rounded-lg bg-primary-500 p-2 text-white transition-all duration-200 hover:bg-primary-600 hover:shadow-glow-sm disabled:cursor-not-allowed disabled:opacity-40"
             title="Send"
           >
             {isLoading ? (
@@ -161,13 +161,13 @@ export function PromptInput({
       {(selectedFileName || selectedImageName || uploadError) && (
         <div className="mt-2 space-y-1 text-xs">
           {selectedFileName && (
-            <p className="text-gray-500 dark:text-gray-400">File: {selectedFileName}</p>
+            <p className="text-[#8B949E]">File: {selectedFileName}</p>
           )}
           {selectedImageName && (
-            <p className="text-gray-500 dark:text-gray-400">Image: {selectedImageName}</p>
+            <p className="text-[#8B949E]">Image: {selectedImageName}</p>
           )}
           {uploadError && (
-            <p className="text-red-600 dark:text-red-400">{uploadError}</p>
+            <p className="text-[#F85149]">{uploadError}</p>
           )}
         </div>
       )}

@@ -34,28 +34,28 @@ export function Header() {
   ];
 
   return (
-    <header className="sticky top-0 z-50 border-b border-gray-200 bg-white/80 backdrop-blur-md dark:border-gray-700 dark:bg-gray-900/80">
+    <header className="sticky top-0 z-50 border-b border-[#30363D] bg-[#0B0F17]/90 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         {/* Logo */}
-        <Link href="/" className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary-600 text-white font-bold text-sm">
+        <Link href="/" className="flex items-center gap-2.5 group">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary-500 to-openai text-white font-bold text-xs shadow-glow-sm group-hover:shadow-glow transition-all duration-300">
             AI
           </div>
-          <span className="text-lg font-bold text-gray-900 dark:text-white">
-            Model Playground
+          <span className="text-base font-bold text-[#F0F6FC] tracking-tight">
+            Model <span className="text-primary-400">Playground</span>
           </span>
         </Link>
 
         {/* Navigation */}
-        <nav className="hidden md:flex items-center gap-6">
+        <nav className="hidden md:flex items-center gap-1">
           {navLinks.map((link) => (
             <Link
               key={link.href}
               href={link.href}
-              className={`text-sm font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-200 ${
                 pathname === link.href
-                  ? 'text-primary-600 dark:text-primary-400'
-                  : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+                  ? 'bg-[#1C2128] text-[#F0F6FC] border border-[#30363D]'
+                  : 'text-[#8B949E] hover:text-[#F0F6FC] hover:bg-[#1C2128]'
               }`}
             >
               {link.label}
@@ -64,12 +64,18 @@ export function Header() {
         </nav>
 
         {/* Auth Actions */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {isAuthenticated ? (
             <>
-              <span className="hidden sm:inline text-sm text-gray-600 dark:text-gray-400">
-                {user?.first_name} {user?.last_name}
-              </span>
+              {/* User pill */}
+              <div className="hidden sm:flex items-center gap-2 rounded-full border border-[#30363D] bg-[#161B22] px-3 py-1.5">
+                <div className="h-5 w-5 rounded-full bg-gradient-to-br from-primary-500 to-[#10A37F] flex items-center justify-center text-white text-[10px] font-bold">
+                  {user?.first_name?.[0]?.toUpperCase() ?? 'U'}
+                </div>
+                <span className="text-xs font-medium text-[#F0F6FC]">
+                  {user?.first_name} {user?.last_name}
+                </span>
+              </div>
               <Button
                 variant="ghost"
                 size="sm"

@@ -54,18 +54,18 @@ export function ComparisonCard({ comparison }: ComparisonCardProps) {
   });
 
   return (
-    <Card className="transition-shadow hover:shadow-md">
+    <Card className="transition-all duration-200 hover:-translate-y-0.5 hover:border-[#8B949E]/30">
       <CardBody>
         <div className="flex items-start justify-between gap-4">
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
+            <p className="text-sm font-medium text-[#F0F6FC] truncate">
               {comparison.prompt}
             </p>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               {comparison.responses.map((response) => (
                 <span
                   key={response.model_id}
-                  className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs dark:bg-gray-700"
+                  className="inline-flex items-center gap-1 rounded-full bg-[#1C2128] border border-[#30363D] px-2 py-0.5 text-xs text-[#8B949E]"
                 >
                   <span
                     className="h-2 w-2 rounded-full"
@@ -77,15 +77,15 @@ export function ComparisonCard({ comparison }: ComparisonCardProps) {
                   <span
                     className={`ml-1 ${
                       response.status === ResponseStatus.COMPLETED
-                        ? 'text-green-600'
-                        : 'text-red-600'
+                        ? 'text-[#10A37F]'
+                        : 'text-[#F85149]'
                     }`}
                   >
                     {response.status === ResponseStatus.COMPLETED ? '✓' : '✗'}
                   </span>
                 </span>
               ))}
-              <span className="text-xs text-gray-400">{date}</span>
+              <span className="text-xs text-[#8B949E]/60">{date}</span>
             </div>
           </div>
 
@@ -116,6 +116,7 @@ export function ComparisonCard({ comparison }: ComparisonCardProps) {
                 variant="ghost"
                 size="sm"
                 onClick={() => setShowConfirm(true)}
+                className="text-[#F85149]/70 hover:text-[#F85149] hover:bg-[#F85149]/10"
               >
                 Delete
               </Button>
