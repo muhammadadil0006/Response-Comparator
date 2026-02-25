@@ -466,12 +466,6 @@ The in-process LRU cache resets on cold starts and does not share state across s
 - High-contrast theme toggle.
 - Focus management after prompt submission.
 
-### Test Coverage
-
-- Unit tests for `ComparisonService` with a mock gateway adapter.
-- Integration tests for API routes using `vitest` + `msw`.
-- Component tests for `ModelPanel` status machine transitions using React Testing Library.
-
 ### Cost Tracking Dashboard
 
 The `estimated_cost` field is already persisted per `ModelResponse`. A simple dashboard aggregating spend by model, date range, and user would help teams track API costs against budgets.
