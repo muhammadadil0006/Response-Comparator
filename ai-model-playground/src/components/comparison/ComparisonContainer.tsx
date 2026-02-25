@@ -6,10 +6,12 @@ import { selectIsAuthenticated } from '@/store/slices/authSlice';
 import {
   setPrompt,
   startComparison,
+  updateComparisonId,
   modelStarted,
   appendChunk,
   modelCompleted,
   modelError,
+  addToolCall,
   resetModelForRetry,
   comparisonCompleted,
   resetComparison,
@@ -41,6 +43,7 @@ export function ComparisonContainer() {
   const isAuthenticated = useAppSelector(selectIsAuthenticated);
   const { isLoading, models, currentPrompt, comparisonId: currentComparisonId, syncScroll } = useAppSelector((state) => state.comparison);
   const lastPromptRef = useRef<string>('');
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [promptDraft, setPromptDraft] = useState('');
   const [localHistory, setLocalHistory] = useState<Comparison[]>([]);
   const [deleteComparison] = useDeleteComparisonMutation();
@@ -157,10 +160,18 @@ export function ComparisonContainer() {
         );
       }
 
+      // Abort any in-flight request before starting a new one
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
       try {
         const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.COMPARISONS}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: abortController.signal,
           body: JSON.stringify({
             prompt,
             models: selectedModels,
@@ -236,13 +247,26 @@ export function ComparisonContainer() {
                         };
                         return acc;
                       }, {});
+                      // Use updateComparisonId to set the real ID without
+                      // wiping the models record. The initial startComparison
+                      // call (before fetch) already set up all model entries.
+                      dispatch(
+                        updateComparisonId({
+                          comparisonId: data.comparisonId,
+                        })
+                      );
+                      // Ensure model entries exist for any newly-resolved IDs
+                      // (defensive — handles ID mismatch between pre-fetch
+                      // and backend-resolved model IDs)
                       if (!options?.isRetry) {
-                        dispatch(
-                          startComparison({
-                            comparisonId: data.comparisonId,
-                            models: resolvedModels,
-                          })
-                        );
+                        resolvedModels.forEach((mId: string) => {
+                          dispatch(
+                            modelStarted({
+                              modelId: mId,
+                              provider: getProviderForModel(mId),
+                            })
+                          );
+                        });
                       }
                     }
                     break;
@@ -281,6 +305,16 @@ export function ComparisonContainer() {
                       })
                     );
                     break;
+                  case SSEEventType.MODEL_TOOL_CALL:
+                    if (data.toolCall) {
+                      dispatch(
+                        addToolCall({
+                          modelId: data.modelId!,
+                          toolCall: data.toolCall,
+                        })
+                      );
+                    }
+                    break;
                   case SSEEventType.MODEL_COMPLETED:
                     modelAccumulator[data.modelId!] = {
                       ...(modelAccumulator[data.modelId!] || {
@@ -295,6 +329,7 @@ export function ComparisonContainer() {
                       modelCompleted({
                         modelId: data.modelId!,
                         metrics: data.metrics ?? null,
+                        finishReason: data.finishReason,
                       })
                     );
                     break;
@@ -312,6 +347,7 @@ export function ComparisonContainer() {
                       modelError({
                         modelId: data.modelId!,
                         error: extractErrorMessage(data.error, 'Unexpected error'),
+                        category: data.category,
                       })
                     );
                     break;

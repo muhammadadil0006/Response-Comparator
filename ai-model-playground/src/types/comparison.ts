@@ -14,6 +14,8 @@ export interface ModelResponseData {
   response_text: string;
   status: ResponseStatus;
   error_message?: string;
+  finish_reason?: string;
+  tool_calls?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
   metrics: ModelMetrics;
 }
 
@@ -59,6 +61,10 @@ export interface SSEDataPayload {
   provider?: string;
   chunk?: string;
   error?: string;
+  /** Error category for richer UI handling */
+  category?: 'rate-limit' | 'capability' | 'auth' | 'not-found' | 'timeout' | 'content-filter' | 'server' | 'unknown';
+  finishReason?: string;
+  toolCall?: { id: string; name: string; args: Record<string, unknown> };
   metrics?: ModelMetrics;
 }
 

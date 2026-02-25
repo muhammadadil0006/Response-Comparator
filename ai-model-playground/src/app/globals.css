@@ -72,3 +72,64 @@ body {
 * {
   scroll-behavior: smooth;
 }
+
+/* ─── Markdown prose overrides ──────────────────────────────────────────────── */
+
+.markdown-body {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.markdown-body p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.markdown-body p:first-child {
+  margin-top: 0;
+}
+
+.markdown-body pre {
+  margin: 0;
+}
+
+.markdown-body code {
+  font-size: 0.8125rem;
+}
+
+/* Code block inside markdown should not have prose margins */
+.markdown-body .code-block {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  border-radius: 0.5rem;
+}
+
+.markdown-body blockquote {
+  margin-left: 0;
+  padding-left: 1rem;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.5rem;
+}
+
+/* Provider-specific accents for model panels */
+.model-panel-openai {
+  --accent: #10a37f;
+}
+.model-panel-anthropic {
+  --accent: #d4a574;
+}
+.model-panel-xai {
+  --accent: #1da1f2;
+}

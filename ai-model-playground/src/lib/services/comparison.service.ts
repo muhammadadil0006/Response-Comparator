@@ -1,8 +1,26 @@
 import { prisma } from '@/lib/db/prisma';
 import { getAdapter } from '@/lib/ai-providers';
+import { GatewayError } from '@/lib/ai-providers/vercel-gateway';
 import { extractErrorMessage } from '@/lib/utils/errors';
 import { DEFAULT_MODELS } from '@/types/models';
 import { SSEEventType } from '@/types/enums';
+
+const MAX_RETRIES = 2;
+const BASE_DELAY_MS = 2000;
+
+/** Delay helper (exponential backoff with jitter) */
+function delayMs(attempt: number, baseMs: number = BASE_DELAY_MS): Promise<void> {
+  const ms = baseMs * Math.pow(2, attempt) + Math.random() * 500;
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Categorize an error for the frontend */
+function categorizeError(error: unknown): { message: string; category: string } {
+  if (error instanceof GatewayError) {
+    return { message: error.message, category: error.category };
+  }
+  return { message: extractErrorMessage(error, 'Unknown error'), category: 'unknown' };
+}
 
 export interface ComparisonResult {
   comparisonId: string;
@@ -193,8 +211,6 @@ export class ComparisonService {
           await Promise.allSettled(
             adapterEntries.map(async (adapter) => {
               const startTime = performance.now();
-              let fullText = '';
-              let tokenCount = 0;
 
               console.log(`[ComparisonService.stream] Starting model="${adapter.modelId}" provider="${adapter.provider}"`);
               sendEvent(SSEEventType.MODEL_STARTED, {
@@ -203,83 +219,142 @@ export class ComparisonService {
                 comparisonId: comparison.id,
               });
 
-              try {
-                for await (const chunk of adapter.stream(prompt)) {
-                  fullText += chunk.text;
-                  tokenCount += chunk.tokens;
-
+              // Retry loop for rate-limited requests
+              let lastError: unknown = null;
+              for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+                if (attempt > 0) {
+                  const waitMs = lastError instanceof GatewayError && lastError.retryAfterMs
+                    ? lastError.retryAfterMs
+                    : BASE_DELAY_MS * Math.pow(2, attempt - 1);
+                  console.log(`[ComparisonService.stream] Retrying model="${adapter.modelId}" attempt=${attempt} after ${waitMs}ms`);
                   sendEvent(SSEEventType.MODEL_CHUNK, {
                     modelId: adapter.modelId,
                     comparisonId: comparison.id,
-                    chunk: chunk.text,
+                    chunk: '', // empty chunk signals retry in progress
+                    retrying: true,
+                    attempt,
+                    waitMs,
                   });
+                  await delayMs(attempt - 1, lastError instanceof GatewayError && lastError.retryAfterMs ? lastError.retryAfterMs / 2 : BASE_DELAY_MS);
                 }
 
-                const responseTimeMs = Math.round(
-                  performance.now() - startTime
-                );
-                const promptTokens = Math.ceil(prompt.length / 4);
-                const completionTokens = tokenCount;
-                const totalTokens = promptTokens + completionTokens;
-                const estimatedCost = adapter.calculateCost(
-                  promptTokens,
-                  completionTokens
-                );
+                try {
+                  let fullText = '';
+                  let tokenCount = 0;
+                  let streamFinishReason: string = 'unknown';
+                  let streamUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
+                  const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
 
-                // Save completed response to DB independently
-                await prisma.modelResponse.create({
-                  data: {
-                    comparisonId: comparison.id,
-                    modelId: adapter.modelId,
-                    provider: adapter.provider,
-                    responseText: fullText,
-                    status: 'completed',
-                    responseTimeMs,
+                  for await (const event of adapter.stream(prompt)) {
+                    switch (event.type) {
+                      case 'text-delta':
+                        fullText += event.text;
+                        tokenCount += event.tokens;
+                        sendEvent(SSEEventType.MODEL_CHUNK, {
+                          modelId: adapter.modelId,
+                          comparisonId: comparison.id,
+                          chunk: event.text,
+                        });
+                        break;
+
+                      case 'tool-call':
+                        toolCalls.push(event.toolCall);
+                        sendEvent(SSEEventType.MODEL_TOOL_CALL, {
+                          modelId: adapter.modelId,
+                          comparisonId: comparison.id,
+                          toolCall: event.toolCall,
+                        });
+                        break;
+
+                      case 'finish':
+                        streamFinishReason = event.finishReason;
+                        streamUsage = event.usage;
+                        break;
+                    }
+                  }
+
+                  const responseTimeMs = Math.round(
+                    performance.now() - startTime
+                  );
+                  // Prefer SDK-reported usage over heuristic counts
+                  const promptTokens = streamUsage?.promptTokens ?? Math.ceil(prompt.length / 4);
+                  const completionTokens = streamUsage?.completionTokens ?? tokenCount;
+                  const totalTokens = streamUsage?.totalTokens ?? (promptTokens + completionTokens);
+                  const estimatedCost = adapter.calculateCost(
                     promptTokens,
-                    completionTokens,
-                    totalTokens,
-                    estimatedCost,
-                  },
-                });
+                    completionTokens
+                  );
 
-                sendEvent(SSEEventType.MODEL_COMPLETED, {
-                  modelId: adapter.modelId,
-                  comparisonId: comparison.id,
-                  metrics: {
-                    response_time_ms: responseTimeMs,
-                    prompt_tokens: promptTokens,
-                    completion_tokens: completionTokens,
-                    total_tokens: totalTokens,
-                    estimated_cost: estimatedCost,
-                  },
-                });
-              } catch (error: unknown) {
-                const errorMessage = extractErrorMessage(error, 'Unknown error');
-                console.error('[ComparisonService][stream][model-error]', {
-                  modelId: adapter.modelId,
-                  provider: adapter.provider,
-                  error: errorMessage,
-                });
+                  // Save completed response to DB independently
+                  await prisma.modelResponse.create({
+                    data: {
+                      comparisonId: comparison.id,
+                      modelId: adapter.modelId,
+                      provider: adapter.provider,
+                      responseText: fullText,
+                      status: 'completed',
+                      responseTimeMs,
+                      promptTokens,
+                      completionTokens,
+                      totalTokens,
+                      estimatedCost,
+                    },
+                  });
 
-                // Save error response to DB independently
-                await prisma.modelResponse.create({
-                  data: {
+                  sendEvent(SSEEventType.MODEL_COMPLETED, {
+                    modelId: adapter.modelId,
                     comparisonId: comparison.id,
+                    finishReason: streamFinishReason,
+                    metrics: {
+                      response_time_ms: responseTimeMs,
+                      prompt_tokens: promptTokens,
+                      completion_tokens: completionTokens,
+                      total_tokens: totalTokens,
+                      estimated_cost: estimatedCost,
+                    },
+                  });
+
+                  // Success — break out of retry loop
+                  lastError = null;
+                  break;
+                } catch (error: unknown) {
+                  lastError = error;
+                  // Only retry on rate-limit errors
+                  if (error instanceof GatewayError && error.category === 'rate-limit' && attempt < MAX_RETRIES) {
+                    continue;
+                  }
+                  // Non-retryable error or max retries exceeded
+                  const { message: errorMessage, category } = categorizeError(error);
+                  console.error('[ComparisonService][stream][model-error]', {
                     modelId: adapter.modelId,
                     provider: adapter.provider,
-                    status: 'error',
-                    errorMessage,
-                    responseTimeMs: Math.round(
-                      performance.now() - startTime
-                    ),
-                  },
-                });
+                    error: errorMessage,
+                    category,
+                    attempt,
+                  });
 
-                sendEvent(SSEEventType.MODEL_ERROR, {
-                  modelId: adapter.modelId,
-                  comparisonId: comparison.id,
-                  error: errorMessage,
-                });
+                  // Save error response to DB independently
+                  await prisma.modelResponse.create({
+                    data: {
+                      comparisonId: comparison.id,
+                      modelId: adapter.modelId,
+                      provider: adapter.provider,
+                      status: 'error',
+                      errorMessage,
+                      responseTimeMs: Math.round(
+                        performance.now() - startTime
+                      ),
+                    },
+                  });
+
+                  sendEvent(SSEEventType.MODEL_ERROR, {
+                    modelId: adapter.modelId,
+                    comparisonId: comparison.id,
+                    error: errorMessage,
+                    category,
+                  });
+                  break; // Stop retrying
+                }
               }
             })
           );
@@ -360,8 +435,6 @@ export class ComparisonService {
           await Promise.allSettled(
             adapterEntries.map(async (adapter) => {
               const startTime = performance.now();
-              let fullText = '';
-              let tokenCount = 0;
 
               sendEvent(SSEEventType.MODEL_STARTED, {
                 modelId: adapter.modelId,
@@ -369,73 +442,116 @@ export class ComparisonService {
                 comparisonId,
               });
 
-              try {
-                for await (const chunk of adapter.stream(prompt)) {
-                  fullText += chunk.text;
-                  tokenCount += chunk.tokens;
-
-                  sendEvent(SSEEventType.MODEL_CHUNK, {
-                    modelId: adapter.modelId,
-                    comparisonId,
-                    chunk: chunk.text,
-                  });
+              let lastError: unknown = null;
+              for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+                if (attempt > 0) {
+                  const waitMs = lastError instanceof GatewayError && lastError.retryAfterMs
+                    ? lastError.retryAfterMs
+                    : BASE_DELAY_MS * Math.pow(2, attempt - 1);
+                  console.log(`[ComparisonService.update] Retrying model="${adapter.modelId}" attempt=${attempt} after ${waitMs}ms`);
+                  await delayMs(attempt - 1, lastError instanceof GatewayError && lastError.retryAfterMs ? lastError.retryAfterMs / 2 : BASE_DELAY_MS);
                 }
 
-                const responseTimeMs = Math.round(performance.now() - startTime);
-                const promptTokens = Math.ceil(prompt.length / 4);
-                const completionTokens = tokenCount;
-                const totalTokens = promptTokens + completionTokens;
-                const estimatedCost = adapter.calculateCost(promptTokens, completionTokens);
+                try {
+                  let fullText = '';
+                  let tokenCount = 0;
+                  let streamFinishReason: string = 'unknown';
+                  let streamUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
+                  const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
 
-                await prisma.modelResponse.create({
-                  data: {
-                    comparisonId,
+                  for await (const event of adapter.stream(prompt)) {
+                    switch (event.type) {
+                      case 'text-delta':
+                        fullText += event.text;
+                        tokenCount += event.tokens;
+                        sendEvent(SSEEventType.MODEL_CHUNK, {
+                          modelId: adapter.modelId,
+                          comparisonId,
+                          chunk: event.text,
+                        });
+                        break;
+                      case 'tool-call':
+                        toolCalls.push(event.toolCall);
+                        sendEvent(SSEEventType.MODEL_TOOL_CALL, {
+                          modelId: adapter.modelId,
+                          comparisonId,
+                          toolCall: event.toolCall,
+                        });
+                        break;
+                      case 'finish':
+                        streamFinishReason = event.finishReason;
+                        streamUsage = event.usage;
+                        break;
+                    }
+                  }
+
+                  const responseTimeMs = Math.round(performance.now() - startTime);
+                  const promptTokens = streamUsage?.promptTokens ?? Math.ceil(prompt.length / 4);
+                  const completionTokens = streamUsage?.completionTokens ?? tokenCount;
+                  const totalTokens = streamUsage?.totalTokens ?? (promptTokens + completionTokens);
+                  const estimatedCost = adapter.calculateCost(promptTokens, completionTokens);
+
+                  await prisma.modelResponse.create({
+                    data: {
+                      comparisonId,
+                      modelId: adapter.modelId,
+                      provider: adapter.provider,
+                      responseText: fullText,
+                      status: 'completed',
+                      responseTimeMs,
+                      promptTokens,
+                      completionTokens,
+                      totalTokens,
+                      estimatedCost,
+                    },
+                  });
+
+                  sendEvent(SSEEventType.MODEL_COMPLETED, {
                     modelId: adapter.modelId,
-                    provider: adapter.provider,
-                    responseText: fullText,
-                    status: 'completed',
-                    responseTimeMs,
-                    promptTokens,
-                    completionTokens,
-                    totalTokens,
-                    estimatedCost,
-                  },
-                });
-
-                sendEvent(SSEEventType.MODEL_COMPLETED, {
-                  modelId: adapter.modelId,
-                  comparisonId,
-                  metrics: {
-                    response_time_ms: responseTimeMs,
-                    prompt_tokens: promptTokens,
-                    completion_tokens: completionTokens,
-                    total_tokens: totalTokens,
-                    estimated_cost: estimatedCost,
-                  },
-                });
-              } catch (error: unknown) {
-                const errorMessage = extractErrorMessage(error, 'Unknown error');
-                console.error('[ComparisonService][update][model-error]', {
-                  modelId: adapter.modelId,
-                  error: errorMessage,
-                });
-
-                await prisma.modelResponse.create({
-                  data: {
                     comparisonId,
+                    finishReason: streamFinishReason,
+                    metrics: {
+                      response_time_ms: responseTimeMs,
+                      prompt_tokens: promptTokens,
+                      completion_tokens: completionTokens,
+                      total_tokens: totalTokens,
+                      estimated_cost: estimatedCost,
+                    },
+                  });
+                  lastError = null;
+                  break;
+                } catch (error: unknown) {
+                  lastError = error;
+                  if (error instanceof GatewayError && error.category === 'rate-limit' && attempt < MAX_RETRIES) {
+                    continue;
+                  }
+                  const { message: errorMessage, category } = categorizeError(error);
+                  console.error('[ComparisonService][update][model-error]', {
                     modelId: adapter.modelId,
-                    provider: adapter.provider,
-                    status: 'error',
-                    errorMessage,
-                    responseTimeMs: Math.round(performance.now() - startTime),
-                  },
-                });
+                    error: errorMessage,
+                    category,
+                    attempt,
+                  });
 
-                sendEvent(SSEEventType.MODEL_ERROR, {
-                  modelId: adapter.modelId,
-                  comparisonId,
-                  error: errorMessage,
-                });
+                  await prisma.modelResponse.create({
+                    data: {
+                      comparisonId,
+                      modelId: adapter.modelId,
+                      provider: adapter.provider,
+                      status: 'error',
+                      errorMessage,
+                      responseTimeMs: Math.round(performance.now() - startTime),
+                    },
+                  });
+
+                  sendEvent(SSEEventType.MODEL_ERROR, {
+                    modelId: adapter.modelId,
+                    comparisonId,
+                    error: errorMessage,
+                    category,
+                  });
+                  break;
+                }
               }
             })
           );
@@ -505,8 +621,6 @@ export class ComparisonService {
           });
 
           const startTime = performance.now();
-          let fullText = '';
-          let tokenCount = 0;
 
           sendEvent(SSEEventType.MODEL_STARTED, {
             modelId: adapter.modelId,
@@ -514,73 +628,116 @@ export class ComparisonService {
             comparisonId,
           });
 
-          try {
-            for await (const chunk of adapter.stream(prompt)) {
-              fullText += chunk.text;
-              tokenCount += chunk.tokens;
-
-              sendEvent(SSEEventType.MODEL_CHUNK, {
-                modelId: adapter.modelId,
-                comparisonId,
-                chunk: chunk.text,
-              });
+          let lastError: unknown = null;
+          for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            if (attempt > 0) {
+              const waitMs = lastError instanceof GatewayError && lastError.retryAfterMs
+                ? lastError.retryAfterMs
+                : BASE_DELAY_MS * Math.pow(2, attempt - 1);
+              console.log(`[ComparisonService.regenerate] Retrying model="${adapter.modelId}" attempt=${attempt} after ${waitMs}ms`);
+              await delayMs(attempt - 1, lastError instanceof GatewayError && lastError.retryAfterMs ? lastError.retryAfterMs / 2 : BASE_DELAY_MS);
             }
 
-            const responseTimeMs = Math.round(performance.now() - startTime);
-            const promptTokens = Math.ceil(prompt.length / 4);
-            const completionTokens = tokenCount;
-            const totalTokens = promptTokens + completionTokens;
-            const estimatedCost = adapter.calculateCost(promptTokens, completionTokens);
+            try {
+              let fullText = '';
+              let tokenCount = 0;
+              let streamFinishReason: string = 'unknown';
+              let streamUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
+              const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
 
-            await prisma.modelResponse.create({
-              data: {
-                comparisonId,
+              for await (const event of adapter.stream(prompt)) {
+                switch (event.type) {
+                  case 'text-delta':
+                    fullText += event.text;
+                    tokenCount += event.tokens;
+                    sendEvent(SSEEventType.MODEL_CHUNK, {
+                      modelId: adapter.modelId,
+                      comparisonId,
+                      chunk: event.text,
+                    });
+                    break;
+                  case 'tool-call':
+                    toolCalls.push(event.toolCall);
+                    sendEvent(SSEEventType.MODEL_TOOL_CALL, {
+                      modelId: adapter.modelId,
+                      comparisonId,
+                      toolCall: event.toolCall,
+                    });
+                    break;
+                  case 'finish':
+                    streamFinishReason = event.finishReason;
+                    streamUsage = event.usage;
+                    break;
+                }
+              }
+
+              const responseTimeMs = Math.round(performance.now() - startTime);
+              const promptTokens = streamUsage?.promptTokens ?? Math.ceil(prompt.length / 4);
+              const completionTokens = streamUsage?.completionTokens ?? tokenCount;
+              const totalTokens = streamUsage?.totalTokens ?? (promptTokens + completionTokens);
+              const estimatedCost = adapter.calculateCost(promptTokens, completionTokens);
+
+              await prisma.modelResponse.create({
+                data: {
+                  comparisonId,
+                  modelId: adapter.modelId,
+                  provider: adapter.provider,
+                  responseText: fullText,
+                  status: 'completed',
+                  responseTimeMs,
+                  promptTokens,
+                  completionTokens,
+                  totalTokens,
+                  estimatedCost,
+                },
+              });
+
+              sendEvent(SSEEventType.MODEL_COMPLETED, {
                 modelId: adapter.modelId,
-                provider: adapter.provider,
-                responseText: fullText,
-                status: 'completed',
-                responseTimeMs,
-                promptTokens,
-                completionTokens,
-                totalTokens,
-                estimatedCost,
-              },
-            });
-
-            sendEvent(SSEEventType.MODEL_COMPLETED, {
-              modelId: adapter.modelId,
-              comparisonId,
-              metrics: {
-                response_time_ms: responseTimeMs,
-                prompt_tokens: promptTokens,
-                completion_tokens: completionTokens,
-                total_tokens: totalTokens,
-                estimated_cost: estimatedCost,
-              },
-            });
-          } catch (error: unknown) {
-            const errorMessage = extractErrorMessage(error, 'Unknown error');
-            console.error('[ComparisonService][regenerate][model-error]', {
-              modelId: adapter.modelId,
-              error: errorMessage,
-            });
-
-            await prisma.modelResponse.create({
-              data: {
                 comparisonId,
+                finishReason: streamFinishReason,
+                metrics: {
+                  response_time_ms: responseTimeMs,
+                  prompt_tokens: promptTokens,
+                  completion_tokens: completionTokens,
+                  total_tokens: totalTokens,
+                  estimated_cost: estimatedCost,
+                },
+              });
+              lastError = null;
+              break;
+            } catch (error: unknown) {
+              lastError = error;
+              if (error instanceof GatewayError && error.category === 'rate-limit' && attempt < MAX_RETRIES) {
+                continue;
+              }
+              const { message: errorMessage, category } = categorizeError(error);
+              console.error('[ComparisonService][regenerate][model-error]', {
                 modelId: adapter.modelId,
-                provider: adapter.provider,
-                status: 'error',
-                errorMessage,
-                responseTimeMs: Math.round(performance.now() - startTime),
-              },
-            });
+                error: errorMessage,
+                category,
+                attempt,
+              });
 
-            sendEvent(SSEEventType.MODEL_ERROR, {
-              modelId: adapter.modelId,
-              comparisonId,
-              error: errorMessage,
-            });
+              await prisma.modelResponse.create({
+                data: {
+                  comparisonId,
+                  modelId: adapter.modelId,
+                  provider: adapter.provider,
+                  status: 'error',
+                  errorMessage,
+                  responseTimeMs: Math.round(performance.now() - startTime),
+                },
+              });
+
+              sendEvent(SSEEventType.MODEL_ERROR, {
+                modelId: adapter.modelId,
+                comparisonId,
+                error: errorMessage,
+                category,
+              });
+              break;
+            }
           }
 
           sendEvent(SSEEventType.COMPARISON_COMPLETED, { comparisonId });

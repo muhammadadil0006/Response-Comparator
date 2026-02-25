@@ -13,13 +13,22 @@ import {
 import { ModelStatus } from '@/types/enums';
 import type { ModelMetrics } from '@/types/comparison';
 
+interface ToolCallData {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+
 interface ModelPanelProps {
   modelId: string;
   provider: string;
   status: ModelStatus;
   responseText: string;
   errorMessage?: string;
+  errorCategory?: string;
   metrics: ModelMetrics | null;
+  finishReason?: string;
+  toolCalls?: ToolCallData[];
   onRetry?: (modelId: string) => void;
   onRegenerate?: (modelId: string) => void;
   scrollRef?: (el: HTMLDivElement | null) => void;
@@ -32,7 +41,10 @@ export const ModelPanel = memo(function ModelPanel({
   status,
   responseText,
   errorMessage,
+  errorCategory,
   metrics,
+  finishReason,
+  toolCalls,
   onRetry,
   onRegenerate,
   scrollRef,
@@ -56,7 +68,7 @@ export const ModelPanel = memo(function ModelPanel({
   };
 
   return (
-    <Card className="flex flex-col h-full">
+    <Card className="flex flex-col h-full overflow-hidden" style={{ borderTopColor: providerColor, borderTopWidth: '3px' }}>
       <CardHeader className="shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -84,10 +96,22 @@ export const ModelPanel = memo(function ModelPanel({
           </div>
         )}
 
+        {status === ModelStatus.PENDING && (
+          <div className="flex h-full min-h-50 items-center justify-center">
+            <div className="flex flex-col items-center gap-2 text-sm text-gray-400">
+              <Spinner size="md" />
+              <span>Preparing response...</span>
+            </div>
+          </div>
+        )}
+
         {(status === ModelStatus.STREAMING || status === ModelStatus.COMPLETED) && (
           <StreamingResponse
             text={responseText}
             isStreaming={status === ModelStatus.STREAMING}
+            provider={provider}
+            toolCalls={toolCalls}
+            finishReason={finishReason}
             scrollRef={scrollRef}
             onScroll={onScroll}
           />
@@ -95,23 +119,12 @@ export const ModelPanel = memo(function ModelPanel({
 
         {status === ModelStatus.ERROR && (
           <div className="flex min-h-50 items-center justify-center">
-            <div className="rounded-lg bg-red-50 p-4 text-center dark:bg-red-900/20">
-              <p className="text-sm font-medium text-red-800 dark:text-red-200">
-                Error
-              </p>
-              <p className="mt-1 text-xs text-red-600 dark:text-red-400">
-                {errorMessage || 'An unexpected error occurred'}
-              </p>
-              {onRetry && (
-                <button
-                  type="button"
-                  onClick={() => onRetry(modelId)}
-                  className="mt-3 inline-flex items-center gap-1 rounded-md bg-red-100 px-3 py-1.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300 dark:hover:bg-red-900/60"
-                >
-                  ↻ Retry
-                </button>
-              )}
-            </div>
+            <ErrorDisplay
+              errorMessage={errorMessage}
+              errorCategory={errorCategory}
+              modelId={modelId}
+              onRetry={onRetry}
+            />
           </div>
         )}
       </CardBody>
@@ -183,5 +196,101 @@ function StatusBadge({ status }: { status: ModelStatus }) {
       {status === ModelStatus.STREAMING && <Spinner size="sm" />}
       {label}
     </span>
+  );
+}
+
+/** Category-aware error display for model panels */
+function ErrorDisplay({
+  errorMessage,
+  errorCategory,
+  modelId,
+  onRetry,
+}: {
+  errorMessage?: string;
+  errorCategory?: string;
+  modelId: string;
+  onRetry?: (modelId: string) => void;
+}) {
+  const categoryConfig: Record<string, { title: string; icon: string; bgClass: string; textClass: string; hint?: string }> = {
+    'capability': {
+      title: 'Unsupported Request',
+      icon: '🚫',
+      bgClass: 'bg-amber-50 dark:bg-amber-900/20',
+      textClass: 'text-amber-800 dark:text-amber-200',
+      hint: 'This model cannot perform this type of task. Try a different prompt.',
+    },
+    'rate-limit': {
+      title: 'Rate Limited',
+      icon: '⏳',
+      bgClass: 'bg-orange-50 dark:bg-orange-900/20',
+      textClass: 'text-orange-800 dark:text-orange-200',
+      hint: 'Too many requests. The system will automatically retry.',
+    },
+    'content-filter': {
+      title: 'Content Filtered',
+      icon: '🛡️',
+      bgClass: 'bg-purple-50 dark:bg-purple-900/20',
+      textClass: 'text-purple-800 dark:text-purple-200',
+      hint: 'The safety system blocked this request. Try rephrasing.',
+    },
+    'auth': {
+      title: 'Authentication Error',
+      icon: '🔒',
+      bgClass: 'bg-red-50 dark:bg-red-900/20',
+      textClass: 'text-red-800 dark:text-red-200',
+    },
+    'not-found': {
+      title: 'Model Not Found',
+      icon: '❓',
+      bgClass: 'bg-gray-50 dark:bg-gray-800',
+      textClass: 'text-gray-800 dark:text-gray-200',
+    },
+    'timeout': {
+      title: 'Request Timed Out',
+      icon: '⏰',
+      bgClass: 'bg-yellow-50 dark:bg-yellow-900/20',
+      textClass: 'text-yellow-800 dark:text-yellow-200',
+      hint: 'The model took too long to respond. Try again.',
+    },
+    'server': {
+      title: 'Server Error',
+      icon: '🔧',
+      bgClass: 'bg-red-50 dark:bg-red-900/20',
+      textClass: 'text-red-800 dark:text-red-200',
+      hint: 'An issue with the AI service. Try again later.',
+    },
+  };
+
+  const config = categoryConfig[errorCategory || ''] || {
+    title: 'Error',
+    icon: '⚠️',
+    bgClass: 'bg-red-50 dark:bg-red-900/20',
+    textClass: 'text-red-800 dark:text-red-200',
+  };
+
+  return (
+    <div className={`rounded-lg ${config.bgClass} p-4 text-center max-w-xs`}>
+      <div className="text-2xl mb-1">{config.icon}</div>
+      <p className={`text-sm font-medium ${config.textClass}`}>
+        {config.title}
+      </p>
+      <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+        {errorMessage || 'An unexpected error occurred'}
+      </p>
+      {config.hint && (
+        <p className="mt-1.5 text-[11px] text-gray-500 dark:text-gray-500 italic">
+          {config.hint}
+        </p>
+      )}
+      {onRetry && errorCategory !== 'capability' && errorCategory !== 'auth' && (
+        <button
+          type="button"
+          onClick={() => onRetry(modelId)}
+          className="mt-3 inline-flex items-center gap-1 rounded-md bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+        >
+          ↻ Retry
+        </button>
+      )}
+    </div>
   );
 }

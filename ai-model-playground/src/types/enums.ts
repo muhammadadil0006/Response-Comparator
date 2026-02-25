@@ -47,6 +47,7 @@ export enum SSEEventType {
   COMPARISON_STARTED = 'comparison_started',
   MODEL_STARTED = 'model_started',
   MODEL_CHUNK = 'model_chunk',
+  MODEL_TOOL_CALL = 'model_tool_call',
   MODEL_COMPLETED = 'model_completed',
   MODEL_ERROR = 'model_error',
   COMPARISON_COMPLETED = 'comparison_completed',

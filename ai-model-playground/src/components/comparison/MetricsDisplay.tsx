@@ -57,19 +57,19 @@ export const MetricsDisplay = memo(function MetricsDisplay({
       <div className="flex justify-between">
         <span className="text-gray-500 dark:text-gray-400">Prompt:</span>
         <span className="font-mono font-medium text-gray-700 dark:text-gray-300">
-          {metrics.prompt_tokens.toLocaleString()}
+          {metrics?.prompt_tokens?.toLocaleString() || '--'}
         </span>
       </div>
       <div className="flex justify-between">
         <span className="text-gray-500 dark:text-gray-400">Completion:</span>
         <span className="font-mono font-medium text-gray-700 dark:text-gray-300">
-          {metrics.completion_tokens.toLocaleString()}
+          {metrics?.completion_tokens?.toLocaleString() || '--'}
         </span>
       </div>
       <div className="col-span-2 flex justify-between border-t border-gray-100 pt-1 dark:border-gray-700">
         <span className="text-gray-500 dark:text-gray-400">Total tokens:</span>
         <span className="font-mono font-medium text-gray-700 dark:text-gray-300">
-          {metrics.total_tokens.toLocaleString()}
+          {metrics?.total_tokens?.toLocaleString() || '--'}
         </span>
       </div>
     </div>

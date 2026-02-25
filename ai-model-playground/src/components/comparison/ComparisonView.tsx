@@ -116,7 +116,10 @@ export function ComparisonView({ models, currentPrompt, syncScroll = true, onRet
             status={model.status}
             responseText={model.responseText}
             errorMessage={model.errorMessage}
+            errorCategory={model.errorCategory}
             metrics={model.metrics}
+            finishReason={model.finishReason}
+            toolCalls={model.toolCalls}
             onRetry={onRetry}
             onRegenerate={onRegenerate}
             scrollRef={(el) => registerScrollRef(model.modelId, el)}

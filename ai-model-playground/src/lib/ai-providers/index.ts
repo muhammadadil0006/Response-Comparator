@@ -40,4 +40,13 @@ export function getAvailableModels(): ModelId[] {
   return Object.keys(adapters) as ModelId[];
 }
 
-export { type AIAdapter, type AIResponse, type StreamChunk } from '@/lib/ai-providers/base';
+export {
+  type AIAdapter,
+  type AIResponse,
+  type StreamChunk,
+  type StreamEvent,
+  type ToolCall,
+  type ToolCallChunk,
+  type FinishChunk,
+  type FinishReason,
+} from '@/lib/ai-providers/base';
