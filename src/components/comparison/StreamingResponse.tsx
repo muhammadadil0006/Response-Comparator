@@ -46,6 +46,8 @@ export const StreamingResponse = memo(function StreamingResponse({
   // auto-scroll — prevents the synthetic scroll event from triggering the
   // ratio-based sync-scroll logic and causing panels to fight each other.
   const isAutoScrollingRef = useRef(false);
+  // Track previous isStreaming to detect the streaming→completed transition.
+  const prevIsStreamingRef = useRef(isStreaming);
 
   const setRef = useCallback(
     (el: HTMLDivElement | null) => {
@@ -55,6 +57,7 @@ export const StreamingResponse = memo(function StreamingResponse({
     [scrollRef]
   );
 
+  // Auto-scroll to bottom on every chunk while streaming.
   useEffect(() => {
     if (isStreaming && containerRef.current) {
       // Mark the upcoming scroll as automatic so the onScroll guard
@@ -68,6 +71,25 @@ export const StreamingResponse = memo(function StreamingResponse({
       });
     }
   }, [text, isStreaming]);
+
+  // When streaming completes, scroll to bottom once more so the full response
+  // end and the stats footer become visible. We use rAF to wait for the
+  // MarkdownRenderer to finish painting before measuring scrollHeight.
+  useEffect(() => {
+    const wasStreaming = prevIsStreamingRef.current;
+    prevIsStreamingRef.current = isStreaming;
+
+    if (wasStreaming && !isStreaming && containerRef.current) {
+      const el = containerRef.current;
+      requestAnimationFrame(() => {
+        isAutoScrollingRef.current = true;
+        el.scrollTop = el.scrollHeight;
+        requestAnimationFrame(() => {
+          isAutoScrollingRef.current = false;
+        });
+      });
+    }
+  }, [isStreaming]);
 
   const handleScroll = useCallback(() => {
     // Only forward the event to the sync handler when the user actually

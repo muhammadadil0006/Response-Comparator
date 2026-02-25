@@ -64,12 +64,38 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
   // per model; a throttled flush copies it to React state every ~50 ms so
   // panels re-render at a comfortable 20 fps without blocking the main thread.
   const streamingTextsRef = useRef<Record<string, string>>({});
+
+  // Ref for the outer scrollable chat area — scrolled to bottom after all models finish
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  // Track whether any model was active on the previous render to detect completion
+  const wasAnyActiveRef = useRef(false);
   const [streamingTexts, setStreamingTexts] = useState<Record<string, string>>({});
   const flushStreamingDisplay = useThrottledCallback(
     () => { setStreamingTexts({ ...streamingTextsRef.current }); },
     50,
     { leading: false, trailing: true }
   );
+
+  // ── Scroll outer chat container to bottom when all models finish ───────────
+  // The stats footer (CardFooter) is outside the inner StreamingResponse div so
+  // we must scroll the page-level container, not the per-panel text area.
+  useEffect(() => {
+    const hasActive = Object.values(models).some(
+      (m) => m.status === ModelStatus.STREAMING || m.status === ModelStatus.PENDING
+    );
+    const hadActive = wasAnyActiveRef.current;
+    wasAnyActiveRef.current = hasActive;
+
+    if (hadActive && !hasActive && chatScrollRef.current) {
+      // Give React one frame to finish painting the completed state
+      // (MarkdownRenderer, metrics grid) before measuring scrollHeight.
+      requestAnimationFrame(() => {
+        if (chatScrollRef.current) {
+          chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+        }
+      });
+    }
+  }, [models]);
 
   // ── Persist in-flight state to localStorage on every models change ───────────
   // This is more reliable than beforeunload (which can be skipped by browsers).
@@ -831,7 +857,7 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
           </div>
         ) : (
           /* Chat content */
-          <div className="flex-1 overflow-y-auto px-4 py-4 pb-48 sm:px-6">
+          <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-4 py-4 pb-48 sm:px-6">
             <ComparisonView
               models={models}
               currentPrompt={currentPrompt}

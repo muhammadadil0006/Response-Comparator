@@ -55,13 +55,13 @@ export const MetricsDisplay = memo(function MetricsDisplay({
         </span>
       </div>
       <div className="flex justify-between">
-        <span className="text-[#8B949E]">Prompt:</span>
+        <span className="text-[#8B949E]">Prompt tokens:</span>
         <span className="font-mono font-medium text-[#F0F6FC]/80">
           {metrics?.prompt_tokens?.toLocaleString() || '--'}
         </span>
       </div>
       <div className="flex justify-between">
-        <span className="text-[#8B949E]">Completion:</span>
+        <span className="text-[#8B949E]">Completion tokens:</span>
         <span className="font-mono font-medium text-[#F0F6FC]/80">
           {metrics?.completion_tokens?.toLocaleString() || '--'}
         </span>
