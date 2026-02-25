@@ -35,11 +35,11 @@ export class ErrorBoundary extends React.Component<
       return (
         this.props.fallback || (
           <div className="flex flex-col items-center justify-center p-8 text-center">
-            <div className="rounded-lg bg-red-50 p-6 dark:bg-red-900/20">
-              <h2 className="text-lg font-semibold text-red-800 dark:text-red-200">
+            <div className="rounded-xl border border-[#F85149]/20 bg-[#F85149]/10 p-6">
+              <h2 className="text-lg font-semibold text-[#F85149]">
                 Something went wrong
               </h2>
-              <p className="mt-2 text-sm text-red-600 dark:text-red-400">
+              <p className="mt-2 text-sm text-[#8B949E]">
                 {extractErrorMessage(
                   this.state.error,
                   'An unexpected error occurred'
@@ -47,7 +47,7 @@ export class ErrorBoundary extends React.Component<
               </p>
               <button
                 onClick={() => this.setState({ hasError: false, error: undefined })}
-                className="mt-4 rounded-md bg-red-600 px-4 py-2 text-sm text-white hover:bg-red-700"
+                className="mt-4 rounded-lg bg-[#1C2128] border border-[#30363D] px-4 py-2 text-sm text-[#F0F6FC] hover:bg-[#30363D] transition-colors"
               >
                 Try Again
               </button>

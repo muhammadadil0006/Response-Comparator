@@ -22,14 +22,14 @@ export function HistoryList() {
 
   if (error) {
     return (
-      <div className="rounded-lg bg-red-50 p-6 text-center dark:bg-red-900/20">
-        <p className="text-red-700 dark:text-red-300">
+      <div className="rounded-xl border border-[#F85149]/20 bg-[#F85149]/10 p-6 text-center">
+        <p className="text-[#F85149]">
           {extractErrorMessage(error, 'Failed to load comparison history.')}
         </p>
         <button
           type="button"
           onClick={() => refetch()}
-          className="mt-3 inline-flex items-center gap-1 rounded-md bg-red-100 px-4 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300 dark:hover:bg-red-900/60"
+          className="mt-3 inline-flex items-center gap-1 rounded-lg bg-[#1C2128] border border-[#30363D] px-4 py-2 text-sm font-medium text-[#F0F6FC] transition-colors hover:bg-[#30363D]"
         >
           ↻ Retry
         </button>
@@ -39,8 +39,8 @@ export function HistoryList() {
 
   if (!data?.comparisons.length) {
     return (
-      <div className="rounded-lg border border-dashed border-gray-300 p-12 text-center dark:border-gray-600">
-        <p className="text-gray-500 dark:text-gray-400">
+      <div className="rounded-xl border border-dashed border-[#30363D] p-12 text-center">
+        <p className="text-[#8B949E]">
           No saved comparisons yet. Try comparing some AI models!
         </p>
       </div>
@@ -50,7 +50,7 @@ export function HistoryList() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-gray-500 dark:text-gray-400">
+        <p className="text-sm text-[#8B949E]">
           {data.total} comparison{data.total !== 1 ? 's' : ''} saved
         </p>
       </div>

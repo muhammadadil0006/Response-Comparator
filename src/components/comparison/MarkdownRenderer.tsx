@@ -62,7 +62,7 @@ function TokenRenderer({ token, provider }: { token: Token; provider?: string })
         6: 'text-xs font-medium mt-2 mb-1',
       };
       return (
-        <Tag className={`${sizes[token.level] || sizes[3]} text-gray-900 dark:text-gray-100`}>
+        <Tag className={`${sizes[token.level] || sizes[3]} text-[#F0F6FC]`}>
           <InlineRenderer text={token.text} />
         </Tag>
       );
@@ -73,7 +73,7 @@ function TokenRenderer({ token, provider }: { token: Token; provider?: string })
 
     case 'blockquote':
       return (
-        <blockquote className="my-3 border-l-4 border-gray-300 pl-4 italic text-gray-600 dark:border-gray-600 dark:text-gray-400">
+        <blockquote className="my-3 border-l-4 border-[#30363D] pl-4 italic text-[#8B949E]">
           {token.lines.map((line, i) => (
             <p key={i} className="my-1 text-sm">
               <InlineRenderer text={line} />
@@ -83,7 +83,7 @@ function TokenRenderer({ token, provider }: { token: Token; provider?: string })
       );
 
     case 'hr':
-      return <hr className="my-4 border-gray-200 dark:border-gray-700" />;
+      return <hr className="my-4 border-[#30363D]" />;
 
     case 'table':
       return <TableRenderer token={token} />;
@@ -92,7 +92,7 @@ function TokenRenderer({ token, provider }: { token: Token; provider?: string })
       return (
         <ol className="my-2 list-decimal space-y-1 pl-6 text-sm" start={token.start}>
           {token.items.map((item, i) => (
-            <li key={i} className="text-gray-800 dark:text-gray-200 leading-relaxed">
+            <li key={i} className="text-[#F0F6FC]/90 leading-relaxed">
               <InlineRenderer text={item} />
             </li>
           ))}
@@ -103,7 +103,7 @@ function TokenRenderer({ token, provider }: { token: Token; provider?: string })
       return (
         <ul className="my-2 list-disc space-y-1 pl-6 text-sm">
           {token.items.map((item, i) => (
-            <li key={i} className="text-gray-800 dark:text-gray-200 leading-relaxed">
+            <li key={i} className="text-[#F0F6FC]/90 leading-relaxed">
               <InlineRenderer text={item} />
             </li>
           ))}
@@ -114,12 +114,12 @@ function TokenRenderer({ token, provider }: { token: Token; provider?: string })
       return (
         <ul className="my-2 space-y-1 pl-1 text-sm list-none">
           {token.items.map((item, i) => (
-            <li key={i} className="flex items-start gap-2 text-gray-800 dark:text-gray-200">
+            <li key={i} className="flex items-start gap-2 text-[#F0F6FC]/90">
               <input
                 type="checkbox"
                 checked={item.checked}
                 readOnly
-                className="mt-1 rounded border-gray-300 text-primary-600"
+                className="mt-1 rounded border-[#30363D] accent-primary-500"
               />
               <span className={item.checked ? 'line-through opacity-60' : ''}>
                 <InlineRenderer text={item.text} />
@@ -132,7 +132,7 @@ function TokenRenderer({ token, provider }: { token: Token; provider?: string })
     case 'paragraph':
       if (!token.text.trim()) return null;
       return (
-        <p className="my-2 text-sm leading-relaxed text-gray-800 dark:text-gray-200">
+        <p className="my-2 text-sm leading-relaxed text-[#F0F6FC]/90">
           <InlineRenderer text={token.text} />
         </p>
       );
@@ -155,14 +155,14 @@ function TableRenderer({ token }: { token: Extract<Token, { type: 'table' }> }) 
   };
 
   return (
-    <div className="my-3 overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+    <div className="my-3 overflow-x-auto rounded-lg border border-[#30363D]">
       <table className="min-w-full text-sm">
         <thead>
-          <tr className="bg-gray-50 dark:bg-gray-800">
+          <tr className="bg-[#1C2128]">
             {token.headers.map((header, i) => (
               <th
                 key={i}
-                className={`px-4 py-2 font-semibold text-gray-700 dark:text-gray-300 ${alignClass(token.alignments[i])}`}
+                className={`px-4 py-2 font-semibold text-[#F0F6FC] ${alignClass(token.alignments[i])}`}
               >
                 <InlineRenderer text={header.trim()} />
               </th>
@@ -173,12 +173,12 @@ function TableRenderer({ token }: { token: Extract<Token, { type: 'table' }> }) 
           {token.rows.map((row, ri) => (
             <tr
               key={ri}
-              className={ri % 2 === 0 ? 'bg-white dark:bg-gray-900' : 'bg-gray-50/50 dark:bg-gray-800/50'}
+              className={ri % 2 === 0 ? 'bg-[#161B22]' : 'bg-[#1C2128]/50'}
             >
               {row.map((cell, ci) => (
                 <td
                   key={ci}
-                  className={`border-t border-gray-100 px-4 py-2 text-gray-700 dark:border-gray-800 dark:text-gray-300 ${alignClass(token.alignments[ci])}`}
+                  className={`border-t border-[#30363D] px-4 py-2 text-[#F0F6FC]/80 ${alignClass(token.alignments[ci])}`}
                 >
                   <InlineRenderer text={cell.trim()} />
                 </td>

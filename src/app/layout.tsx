@@ -16,7 +16,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="min-h-screen flex flex-col bg-gray-50 dark:bg-gray-950">
+      <body className="min-h-screen flex flex-col" style={{ background: '#0B0F17', color: '#F0F6FC' }}>
         <Providers>
           <Header />
           <main className="flex-1 w-full px-4 py-8 sm:px-6 lg:px-8">

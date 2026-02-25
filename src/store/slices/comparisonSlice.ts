@@ -231,6 +231,33 @@ export const comparisonSlice = createSlice({
     toggleSyncScroll: (state) => {
       state.syncScroll = !state.syncScroll;
     },
+    /**
+     * Restore a comparison snapshot saved before a page refresh.
+     * Any model that was STREAMING or PENDING at save-time is marked INTERRUPTED.
+     */
+    restoreFromSnapshot: (
+      state,
+      action: PayloadAction<{
+        comparisonId: string | null;
+        currentPrompt: string;
+        models: Record<string, ModelStreamState>;
+      }>
+    ) => {
+      state.comparisonId = action.payload.comparisonId;
+      state.currentPrompt = action.payload.currentPrompt;
+      state.isLoading = false;
+      const restored: Record<string, ModelStreamState> = {};
+      Object.entries(action.payload.models).forEach(([id, model]) => {
+        restored[id] = {
+          ...model,
+          status:
+            model.status === ModelStatus.STREAMING || model.status === ModelStatus.PENDING
+              ? ModelStatus.INTERRUPTED
+              : model.status,
+        };
+      });
+      state.models = restored;
+    },
   },
 });
 
@@ -248,6 +275,7 @@ export const {
   setComparisonFromHistory,
   resetComparison,
   toggleSyncScroll,
+  restoreFromSnapshot,
 } = comparisonSlice.actions;
 
 export default comparisonSlice.reducer;

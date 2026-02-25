@@ -20,6 +20,7 @@ export enum ModelStatus {
   STREAMING = 'streaming',
   COMPLETED = 'completed',
   ERROR = 'error',
+  INTERRUPTED = 'interrupted',
 }
 
 export enum ResponseStatus {
