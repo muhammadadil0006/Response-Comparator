@@ -34,19 +34,49 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json();
     console.log('[API POST /comparisons] Request body:', JSON.stringify(body));
-    const { prompt, models, stream, save } = ComparisonSchema.parse(body);
-    console.log('[API POST /comparisons] Parsed -', { prompt: prompt.substring(0, 50), models, stream, save });
-
-    // Can't save without auth
-    if (save && !userId) {
-      return NextResponse.json(
-        { error: 'Authentication required to save comparisons' },
-        { status: HttpStatus.UNAUTHORIZED }
-      );
-    }
+    const { prompt, models, stream, comparisonId } = ComparisonSchema.parse(body);
+    console.log('[API POST /comparisons] Parsed -', { prompt: prompt.substring(0, 50), models, stream, comparisonId });
 
     const selectedModels = models || DEFAULT_MODELS;
     console.log('[API POST /comparisons] selectedModels:', selectedModels);
+
+    // Regenerate a single model within an existing comparison
+    if (stream && comparisonId && selectedModels.length === 1) {
+      console.log('[API POST /comparisons] Using REGENERATE mode for', comparisonId, selectedModels[0]);
+      const readableStream = comparisonService.regenerateModelStreaming(
+        comparisonId,
+        prompt,
+        selectedModels[0]
+      );
+
+      return new Response(readableStream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+          'X-RateLimit-Remaining': String(remaining),
+        },
+      });
+    }
+
+    // Update existing comparison with new prompt (regenerate all models)
+    if (stream && comparisonId) {
+      console.log('[API POST /comparisons] Using UPDATE mode for', comparisonId);
+      const readableStream = comparisonService.updateComparisonStreaming(
+        comparisonId,
+        prompt,
+        selectedModels
+      );
+
+      return new Response(readableStream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+          'X-RateLimit-Remaining': String(remaining),
+        },
+      });
+    }
 
     // Streaming response
     if (stream) {
@@ -54,8 +84,7 @@ export async function POST(request: NextRequest) {
       const readableStream = comparisonService.createStreamingResponse(
         prompt,
         userId,
-        selectedModels,
-        save
+        selectedModels
       );
 
       return new Response(readableStream, {
@@ -73,8 +102,7 @@ export async function POST(request: NextRequest) {
     const result = await comparisonService.executeComparison(
       prompt,
       userId,
-      selectedModels,
-      save
+      selectedModels
     );
 
     // Fetch full comparison from DB
@@ -143,14 +171,14 @@ export async function GET(request: NextRequest) {
 
     const [comparisons, total]: [PrismaComparisonWithResponses[], number] = await Promise.all([
       prisma.comparison.findMany({
-        where: { userId, saved: true },
+        where: { userId },
         include: { responses: true },
         orderBy: { createdAt: 'desc' },
         take: limit,
         skip: offset,
       }),
       prisma.comparison.count({
-        where: { userId, saved: true },
+        where: { userId },
       }),
     ]);
 

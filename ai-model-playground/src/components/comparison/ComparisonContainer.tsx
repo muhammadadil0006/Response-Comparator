@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
 import { selectIsAuthenticated } from '@/store/slices/authSlice';
 import {
+  setPrompt,
   startComparison,
   modelStarted,
   appendChunk,
@@ -21,7 +22,7 @@ import { DEFAULT_MODELS } from '@/types/models';
 import { ModelStatus, MODEL_ID_TO_PROVIDER, ResponseStatus, SSEEventType } from '@/types/enums';
 import { API_BASE_URL, API_ENDPOINTS } from '@/config/api-endpoints';
 import { extractErrorMessage } from '@/lib/utils/errors';
-import { useListComparisonsQuery } from '@/store/api/comparisonApi';
+import { useListComparisonsQuery, useDeleteComparisonMutation } from '@/store/api/comparisonApi';
 import type { Comparison, SSEDataPayload } from '@/types/comparison';
 
 const ANONYMOUS_CHAT_HISTORY_KEY = 'anonymous_chat_history_v1';
@@ -38,11 +39,12 @@ function getProviderForModel(modelId: string): string {
 export function ComparisonContainer() {
   const dispatch = useAppDispatch();
   const isAuthenticated = useAppSelector(selectIsAuthenticated);
-  const { isLoading, syncScroll, models, currentPrompt } = useAppSelector((state) => state.comparison);
+  const { isLoading, models, currentPrompt, comparisonId: currentComparisonId, syncScroll } = useAppSelector((state) => state.comparison);
   const lastPromptRef = useRef<string>('');
   const [promptDraft, setPromptDraft] = useState('');
   const [localHistory, setLocalHistory] = useState<Comparison[]>([]);
-  const { data: authenticatedHistory } = useListComparisonsQuery(
+  const [deleteComparison] = useDeleteComparisonMutation();
+  const { data: authenticatedHistory, refetch: refetchHistory } = useListComparisonsQuery(
     { limit: 20, offset: 0 },
     { skip: !isAuthenticated }
   );
@@ -101,7 +103,7 @@ export function ComparisonContainer() {
           responses: chat.responses,
         })
       );
-      setPromptDraft(chat.prompt);
+      setPromptDraft('');
       lastPromptRef.current = chat.prompt;
     },
     [dispatch]
@@ -111,12 +113,17 @@ export function ComparisonContainer() {
     async (
       prompt: string,
       modelIds: string[] = DEFAULT_MODELS,
-      options?: { isRetry?: boolean }
+      options?: { isRetry?: boolean; comparisonId?: string }
     ) => {
+      // Determine if we should update an existing comparison
+      const existingComparisonId = options?.comparisonId || currentComparisonId;
+      const isUpdate = !options?.isRetry && !!existingComparisonId && existingComparisonId !== 'pending';
+
       lastPromptRef.current = prompt;
-      setPromptDraft(prompt);
+      setPromptDraft('');
+      dispatch(setPrompt(prompt));
       let selectedModels = modelIds;
-      let completedComparisonId = `local-${Date.now()}`;
+      let completedComparisonId = existingComparisonId || `local-${Date.now()}`;
       let modelAccumulator = selectedModels.reduce<
         Record<
           string,
@@ -144,7 +151,7 @@ export function ComparisonContainer() {
       } else {
         dispatch(
           startComparison({
-            comparisonId: 'pending',
+            comparisonId: existingComparisonId || 'pending',
             models: selectedModels,
           })
         );
@@ -158,7 +165,9 @@ export function ComparisonContainer() {
             prompt,
             models: selectedModels,
             stream: true,
-            save: isAuthenticated && !options?.isRetry,
+            ...((options?.isRetry || isUpdate) && existingComparisonId
+              ? { comparisonId: existingComparisonId }
+              : {}),
           }),
         });
 
@@ -360,139 +369,273 @@ export function ComparisonContainer() {
       } finally {
         dispatch(comparisonCompleted());
 
-        if (!options?.isRetry) {
-          const completedComparison: Comparison = {
-            comparison_id: isAuthenticated ? completedComparisonId : `anon-${Date.now()}`,
-            user_id: null,
-            prompt,
-            saved: isAuthenticated,
-            created_at: new Date().toISOString(),
-            responses: selectedModels.map((modelId) => {
-              const model = modelAccumulator[modelId];
+        // Build the completed comparison object for local history
+        const completedComparison: Comparison = {
+          comparison_id: completedComparisonId.startsWith('local-')
+            ? (isAuthenticated ? completedComparisonId : `anon-${Date.now()}`)
+            : completedComparisonId,
+          user_id: null,
+          prompt,
+          saved: isAuthenticated,
+          created_at: new Date().toISOString(),
+          responses: selectedModels.map((modelId) => {
+            const model = modelAccumulator[modelId];
 
-              return {
-                model_id: modelId,
-                provider: model?.provider || getProviderForModel(modelId),
-                response_text: model?.responseText || '',
-                status:
-                  model?.status === ModelStatus.ERROR
-                    ? ResponseStatus.ERROR
-                    : model?.status === ModelStatus.COMPLETED
-                      ? ResponseStatus.COMPLETED
-                      : ResponseStatus.PENDING,
-                error_message: model?.errorMessage,
-                metrics: {
-                  response_time_ms: model?.metrics?.response_time_ms || 0,
-                  prompt_tokens: model?.metrics?.prompt_tokens || 0,
-                  completion_tokens: model?.metrics?.completion_tokens || 0,
-                  total_tokens: model?.metrics?.total_tokens || 0,
-                  estimated_cost: model?.metrics?.estimated_cost || 0,
-                },
-              };
-            }),
-          };
+            return {
+              model_id: modelId,
+              provider: model?.provider || getProviderForModel(modelId),
+              response_text: model?.responseText || '',
+              status:
+                model?.status === ModelStatus.ERROR
+                  ? ResponseStatus.ERROR
+                  : model?.status === ModelStatus.COMPLETED
+                    ? ResponseStatus.COMPLETED
+                    : ResponseStatus.PENDING,
+              error_message: model?.errorMessage,
+              metrics: {
+                response_time_ms: model?.metrics?.response_time_ms || 0,
+                prompt_tokens: model?.metrics?.prompt_tokens || 0,
+                completion_tokens: model?.metrics?.completion_tokens || 0,
+                total_tokens: model?.metrics?.total_tokens || 0,
+                estimated_cost: model?.metrics?.estimated_cost || 0,
+              },
+            };
+          }),
+        };
 
+        if (options?.isRetry) {
+          // Single model regenerate: update just that model in history
+          const retryModelId = selectedModels[0];
+          const retryModel = modelAccumulator[retryModelId];
+          if (retryModel) {
+            setLocalHistory((previous) => {
+              const updated = previous.map((chat) => {
+                if (chat.comparison_id !== completedComparisonId) return chat;
+                return {
+                  ...chat,
+                  responses: chat.responses.map((r) =>
+                    r.model_id === retryModelId
+                      ? {
+                          ...r,
+                          response_text: retryModel.responseText || '',
+                          status:
+                            retryModel.status === ModelStatus.ERROR
+                              ? ResponseStatus.ERROR
+                              : retryModel.status === ModelStatus.COMPLETED
+                                ? ResponseStatus.COMPLETED
+                                : ResponseStatus.PENDING,
+                          error_message: retryModel.errorMessage,
+                          metrics: {
+                            response_time_ms: retryModel.metrics?.response_time_ms || 0,
+                            prompt_tokens: retryModel.metrics?.prompt_tokens || 0,
+                            completion_tokens: retryModel.metrics?.completion_tokens || 0,
+                            total_tokens: retryModel.metrics?.total_tokens || 0,
+                            estimated_cost: retryModel.metrics?.estimated_cost || 0,
+                          },
+                        }
+                      : r
+                  ),
+                };
+              });
+              persistLocalHistory(updated);
+              return updated;
+            });
+          }
+        } else {
+          // New or update: upsert in history
           setLocalHistory((previous) => {
-            const updatedHistory = [completedComparison, ...previous].slice(
-              0,
-              MAX_ANONYMOUS_CHATS
+            const existingIndex = previous.findIndex(
+              (c) => c.comparison_id === completedComparison.comparison_id
             );
-
-            if (!isAuthenticated) {
-              try {
-                localStorage.setItem(
-                  ANONYMOUS_CHAT_HISTORY_KEY,
-                  JSON.stringify(updatedHistory)
-                );
-              } catch {
-                // Ignore local storage write errors
-              }
+            let updatedHistory: Comparison[];
+            if (existingIndex >= 0) {
+              // Update existing entry
+              updatedHistory = [...previous];
+              updatedHistory[existingIndex] = completedComparison;
+            } else {
+              // Prepend new entry
+              updatedHistory = [completedComparison, ...previous].slice(0, MAX_ANONYMOUS_CHATS);
             }
-
+            persistLocalHistory(updatedHistory);
             return updatedHistory;
           });
         }
+
+        // Refetch server-side history if authenticated
+        if (isAuthenticated) {
+          refetchHistory();
+        }
       }
     },
-    [dispatch, isAuthenticated]
+    [dispatch, isAuthenticated, currentComparisonId, refetchHistory]
   );
 
   const handleRetry = useCallback((modelId: string) => {
     const prompt = lastPromptRef.current || currentPrompt;
     if (prompt) {
-      handleSubmit(prompt, [modelId], { isRetry: true });
+      handleSubmit(prompt, [modelId], { isRetry: true, comparisonId: currentComparisonId || undefined });
     }
-  }, [handleSubmit, currentPrompt]);
+  }, [handleSubmit, currentPrompt, currentComparisonId]);
+
+  const handleEditPrompt = useCallback((text: string) => {
+    setPromptDraft(text);
+  }, []);
+
+  const handleDeleteChat = useCallback(async (comparisonId: string) => {
+    // Remove from local history
+    setLocalHistory((previous) => {
+      const updated = previous.filter((c) => c.comparison_id !== comparisonId);
+      persistLocalHistory(updated);
+      return updated;
+    });
+
+    // Delete from server if authenticated
+    if (isAuthenticated) {
+      try {
+        await deleteComparison(comparisonId).unwrap();
+      } catch {
+        // Ignore — already removed locally
+      }
+    }
+
+    // If the deleted chat is the active one, reset
+    if (currentComparisonId === comparisonId) {
+      dispatch(resetComparison());
+      setPromptDraft('');
+      lastPromptRef.current = '';
+    }
+  }, [isAuthenticated, deleteComparison, currentComparisonId, dispatch]);
+
+  const persistLocalHistory = (history: Comparison[]) => {
+    if (isAuthenticated) return;
+    try {
+      localStorage.setItem(ANONYMOUS_CHAT_HISTORY_KEY, JSON.stringify(history));
+    } catch {
+      // Ignore
+    }
+  };
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[280px_1fr]">
-      <aside className="space-y-3">
+    <div className="grid h-[calc(100vh-8rem)] grid-cols-1 lg:grid-cols-[260px_1fr]">
+      {/* ── Sidebar ─────────────────────────────────────────── */}
+      <aside className="hidden lg:flex flex-col border-r border-gray-200 dark:border-gray-700">
         <button
           type="button"
           onClick={handleNewChat}
-          className="w-full rounded-md bg-gray-100 px-3 py-2 text-left text-sm font-medium text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+          className="m-3 rounded-lg border border-gray-200 px-3 py-2.5 text-left text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
         >
           + New chat
         </button>
 
-        <div className="max-h-[72vh] space-y-1 overflow-y-auto">
+        <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
           {chatHistory.length === 0 ? (
-            <p className="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
+            <p className="px-3 py-4 text-xs text-gray-500 dark:text-gray-400">
               No chats yet
             </p>
           ) : (
-            chatHistory.map((chat) => (
-              <button
-                key={chat.comparison_id}
-                type="button"
-                onClick={() => openChat(chat)}
-                className="w-full rounded-md px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
-              >
-                <p className="truncate font-medium">{chat.prompt}</p>
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {new Date(chat.created_at).toLocaleString()}
-                </p>
-              </button>
-            ))
+            chatHistory.map((chat) => {
+              const isActive = currentComparisonId === chat.comparison_id;
+              return (
+                <div
+                  key={chat.comparison_id}
+                  className={`group relative flex items-center rounded-lg transition-colors ${
+                    isActive
+                      ? 'bg-primary-50 dark:bg-primary-900/30'
+                      : 'hover:bg-gray-100 dark:hover:bg-gray-800'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => openChat(chat)}
+                    className="min-w-0 flex-1 px-3 py-2.5 text-left text-sm"
+                  >
+                    <p className={`truncate font-medium ${
+                      isActive
+                        ? 'text-primary-700 dark:text-primary-300'
+                        : 'text-gray-700 dark:text-gray-300'
+                    }`}>{chat.prompt}</p>
+                    <p className="mt-0.5 text-[11px] text-gray-400 dark:text-gray-500">
+                      {new Date(chat.created_at).toLocaleString()}
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); handleDeleteChat(chat.comparison_id); }}
+                    title="Delete chat"
+                    className="mr-2 shrink-0 rounded-md p-1 text-gray-400 opacity-0 transition-opacity hover:bg-red-100 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+                      <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.519.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.34.06a.75.75 0 1 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
+                    </svg>
+                  </button>
+                </div>
+              );
+            })
           )}
-        </div>
+        </nav>
       </aside>
 
-      <section className="flex min-h-[70vh] flex-col gap-4">
-        <ComparisonView
-          models={models}
-          currentPrompt={currentPrompt}
-          onRetry={handleRetry}
-          onEditResponse={setPromptDraft}
-        />
-
-        <div className="mt-auto space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              {!isAuthenticated && (
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  💡 Sign in to save your comparisons
-                </p>
-              )}
+      {/* ── Main area ───────────────────────────────────────── */}
+      <section className="relative flex flex-col overflow-hidden">
+        {Object.keys(models).length === 0 ? (
+          /* Welcome screen */
+          <div className="flex flex-1 items-center justify-center">
+            <div className="text-center">
+              <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-linear-to-br from-primary-500 to-primary-700 text-white text-xl font-bold shadow-lg">
+                AI
+              </div>
+              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white">
+                Ready when you are
+              </h2>
+              <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                Ask anything to compare responses across AI models
+              </p>
             </div>
-            <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
-              <input
-                type="checkbox"
-                checked={syncScroll}
-                onChange={() => dispatch(toggleSyncScroll())}
-                className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-              />
-              Sync scroll
-            </label>
           </div>
+        ) : (
+          /* Chat content */
+          <div className="flex-1 overflow-y-auto px-4 py-4 pb-48 sm:px-6">
+            <ComparisonView
+              models={models}
+              currentPrompt={currentPrompt}
+              syncScroll={syncScroll}
+              onRetry={handleRetry}
+              onRegenerate={handleRetry}
+              onEditPrompt={handleEditPrompt}
+            />
+          </div>
+        )}
 
-          <PromptInput
-            onSubmit={(prompt) => handleSubmit(prompt)}
-            isLoading={isLoading}
-            isAuthenticated={isAuthenticated}
-            value={promptDraft}
-            onChange={setPromptDraft}
-          />
+        {/* Sticky bottom bar */}
+        <div className="absolute inset-x-0 bottom-0 z-20 border-t border-gray-200 bg-white/80 backdrop-blur-md dark:border-gray-700 dark:bg-gray-900/80">
+          <div className="mx-auto max-w-4xl px-4 py-3 sm:px-6">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                {!isAuthenticated && (
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    💡 Sign in to save comparisons
+                  </p>
+                )}
+              </div>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={syncScroll}
+                  onChange={() => dispatch(toggleSyncScroll())}
+                  className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                Sync scroll
+              </label>
+            </div>
+
+            <PromptInput
+              onSubmit={(prompt) => handleSubmit(prompt)}
+              isLoading={isLoading}
+              isAuthenticated={isAuthenticated}
+              value={promptDraft}
+              onChange={setPromptDraft}
+            />
+          </div>
         </div>
       </section>
     </div>

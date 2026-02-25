@@ -25,7 +25,7 @@ const initialState: ComparisonState = {
   isLoading: false,
   comparisonId: null,
   models: {},
-  syncScroll: false,
+  syncScroll: true,
 };
 
 export const comparisonSlice = createSlice({
@@ -35,9 +35,12 @@ export const comparisonSlice = createSlice({
     setPrompt: (state, action: PayloadAction<string>) => {
       state.currentPrompt = action.payload;
     },
-    startComparison: (state, action: PayloadAction<{ comparisonId: string; models: string[] }>) => {
+    startComparison: (state, action: PayloadAction<{ comparisonId: string; models: string[]; prompt?: string }>) => {
       state.isLoading = true;
       state.comparisonId = action.payload.comparisonId;
+      if (action.payload.prompt) {
+        state.currentPrompt = action.payload.prompt;
+      }
       state.models = {};
       action.payload.models.forEach((modelId) => {
         state.models[modelId] = {
@@ -131,10 +134,10 @@ export const comparisonSlice = createSlice({
         };
       });
     },
+    resetComparison: () => initialState,
     toggleSyncScroll: (state) => {
       state.syncScroll = !state.syncScroll;
     },
-    resetComparison: () => initialState,
   },
 });
 
@@ -148,8 +151,8 @@ export const {
   resetModelForRetry,
   comparisonCompleted,
   setComparisonFromHistory,
-  toggleSyncScroll,
   resetComparison,
+  toggleSyncScroll,
 } = comparisonSlice.actions;
 
 export default comparisonSlice.reducer;

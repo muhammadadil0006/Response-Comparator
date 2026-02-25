@@ -24,15 +24,14 @@ export class ComparisonService {
   async executeComparison(
     prompt: string,
     userId: string | null,
-    models: string[] = DEFAULT_MODELS,
-    save: boolean = false
+    models: string[] = DEFAULT_MODELS
   ): Promise<ComparisonResult> {
-    // Create comparison record
+    // Always create a comparison record in the DB
     const comparison = await prisma.comparison.create({
       data: {
         userId,
         prompt,
-        saved: save && !!userId,
+        saved: true,
       },
     });
 
@@ -138,8 +137,7 @@ export class ComparisonService {
   createStreamingResponse(
     prompt: string,
     userId: string | null,
-    models: string[] = DEFAULT_MODELS,
-    save: boolean = false
+    models: string[] = DEFAULT_MODELS
   ): ReadableStream {
     const encoder = new TextEncoder();
 
@@ -169,12 +167,12 @@ export class ComparisonService {
         };
 
         try {
-          // Create comparison record
+          // Always create comparison record in the DB
           const comparison = await prisma.comparison.create({
             data: {
               userId,
               prompt,
-              saved: save && !!userId,
+              saved: true,
             },
           });
 
@@ -295,6 +293,301 @@ export class ComparisonService {
           console.error('[ComparisonService][stream][fatal]', {
             error: extractErrorMessage(error, 'Unexpected error'),
             rawError: error,
+          });
+          sendEvent(SSEEventType.ERROR, {
+            message: extractErrorMessage(error, 'Unexpected error'),
+          });
+          closeController();
+        }
+      },
+    });
+  }
+
+  /**
+   * Update an existing comparison with a new prompt.
+   * Deletes ALL old model responses and regenerates them with the new prompt.
+   */
+  updateComparisonStreaming(
+    comparisonId: string,
+    prompt: string,
+    models: string[] = DEFAULT_MODELS
+  ): ReadableStream {
+    const encoder = new TextEncoder();
+
+    return new ReadableStream({
+      async start(controller) {
+        let closed = false;
+
+        const sendEvent = (event: string, data: unknown) => {
+          if (closed) return;
+          try {
+            controller.enqueue(
+              encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+            );
+          } catch {
+            closed = true;
+          }
+        };
+
+        const closeController = () => {
+          if (closed) return;
+          closed = true;
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        };
+
+        try {
+          // Delete ALL old responses and update the prompt
+          await prisma.modelResponse.deleteMany({
+            where: { comparisonId },
+          });
+          await prisma.comparison.update({
+            where: { id: comparisonId },
+            data: { prompt },
+          });
+
+          const adapterEntries = models.map((modelId) => getAdapter(modelId));
+          const resolvedModelIds = adapterEntries.map((a) => a.modelId);
+
+          sendEvent(SSEEventType.COMPARISON_STARTED, {
+            comparisonId,
+            models: resolvedModelIds,
+          });
+
+          await Promise.allSettled(
+            adapterEntries.map(async (adapter) => {
+              const startTime = performance.now();
+              let fullText = '';
+              let tokenCount = 0;
+
+              sendEvent(SSEEventType.MODEL_STARTED, {
+                modelId: adapter.modelId,
+                provider: adapter.provider,
+                comparisonId,
+              });
+
+              try {
+                for await (const chunk of adapter.stream(prompt)) {
+                  fullText += chunk.text;
+                  tokenCount += chunk.tokens;
+
+                  sendEvent(SSEEventType.MODEL_CHUNK, {
+                    modelId: adapter.modelId,
+                    comparisonId,
+                    chunk: chunk.text,
+                  });
+                }
+
+                const responseTimeMs = Math.round(performance.now() - startTime);
+                const promptTokens = Math.ceil(prompt.length / 4);
+                const completionTokens = tokenCount;
+                const totalTokens = promptTokens + completionTokens;
+                const estimatedCost = adapter.calculateCost(promptTokens, completionTokens);
+
+                await prisma.modelResponse.create({
+                  data: {
+                    comparisonId,
+                    modelId: adapter.modelId,
+                    provider: adapter.provider,
+                    responseText: fullText,
+                    status: 'completed',
+                    responseTimeMs,
+                    promptTokens,
+                    completionTokens,
+                    totalTokens,
+                    estimatedCost,
+                  },
+                });
+
+                sendEvent(SSEEventType.MODEL_COMPLETED, {
+                  modelId: adapter.modelId,
+                  comparisonId,
+                  metrics: {
+                    response_time_ms: responseTimeMs,
+                    prompt_tokens: promptTokens,
+                    completion_tokens: completionTokens,
+                    total_tokens: totalTokens,
+                    estimated_cost: estimatedCost,
+                  },
+                });
+              } catch (error: unknown) {
+                const errorMessage = extractErrorMessage(error, 'Unknown error');
+                console.error('[ComparisonService][update][model-error]', {
+                  modelId: adapter.modelId,
+                  error: errorMessage,
+                });
+
+                await prisma.modelResponse.create({
+                  data: {
+                    comparisonId,
+                    modelId: adapter.modelId,
+                    provider: adapter.provider,
+                    status: 'error',
+                    errorMessage,
+                    responseTimeMs: Math.round(performance.now() - startTime),
+                  },
+                });
+
+                sendEvent(SSEEventType.MODEL_ERROR, {
+                  modelId: adapter.modelId,
+                  comparisonId,
+                  error: errorMessage,
+                });
+              }
+            })
+          );
+
+          sendEvent(SSEEventType.COMPARISON_COMPLETED, { comparisonId });
+          closeController();
+        } catch (error: unknown) {
+          console.error('[ComparisonService][update][fatal]', {
+            error: extractErrorMessage(error, 'Unexpected error'),
+          });
+          sendEvent(SSEEventType.ERROR, {
+            message: extractErrorMessage(error, 'Unexpected error'),
+          });
+          closeController();
+        }
+      },
+    });
+  }
+
+  /**
+   * Regenerate a single model's response within an existing comparison.
+   * Deletes the old model_response row and streams a fresh one.
+   */
+  regenerateModelStreaming(
+    comparisonId: string,
+    prompt: string,
+    modelId: string
+  ): ReadableStream {
+    const encoder = new TextEncoder();
+
+    return new ReadableStream({
+      async start(controller) {
+        let closed = false;
+
+        const sendEvent = (event: string, data: unknown) => {
+          if (closed) return;
+          try {
+            controller.enqueue(
+              encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+            );
+          } catch {
+            closed = true;
+          }
+        };
+
+        const closeController = () => {
+          if (closed) return;
+          closed = true;
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        };
+
+        try {
+          // Delete old response for this model in this comparison
+          await prisma.modelResponse.deleteMany({
+            where: { comparisonId, modelId },
+          });
+
+          const adapter = getAdapter(modelId);
+
+          sendEvent(SSEEventType.COMPARISON_STARTED, {
+            comparisonId,
+            models: [adapter.modelId],
+          });
+
+          const startTime = performance.now();
+          let fullText = '';
+          let tokenCount = 0;
+
+          sendEvent(SSEEventType.MODEL_STARTED, {
+            modelId: adapter.modelId,
+            provider: adapter.provider,
+            comparisonId,
+          });
+
+          try {
+            for await (const chunk of adapter.stream(prompt)) {
+              fullText += chunk.text;
+              tokenCount += chunk.tokens;
+
+              sendEvent(SSEEventType.MODEL_CHUNK, {
+                modelId: adapter.modelId,
+                comparisonId,
+                chunk: chunk.text,
+              });
+            }
+
+            const responseTimeMs = Math.round(performance.now() - startTime);
+            const promptTokens = Math.ceil(prompt.length / 4);
+            const completionTokens = tokenCount;
+            const totalTokens = promptTokens + completionTokens;
+            const estimatedCost = adapter.calculateCost(promptTokens, completionTokens);
+
+            await prisma.modelResponse.create({
+              data: {
+                comparisonId,
+                modelId: adapter.modelId,
+                provider: adapter.provider,
+                responseText: fullText,
+                status: 'completed',
+                responseTimeMs,
+                promptTokens,
+                completionTokens,
+                totalTokens,
+                estimatedCost,
+              },
+            });
+
+            sendEvent(SSEEventType.MODEL_COMPLETED, {
+              modelId: adapter.modelId,
+              comparisonId,
+              metrics: {
+                response_time_ms: responseTimeMs,
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                total_tokens: totalTokens,
+                estimated_cost: estimatedCost,
+              },
+            });
+          } catch (error: unknown) {
+            const errorMessage = extractErrorMessage(error, 'Unknown error');
+            console.error('[ComparisonService][regenerate][model-error]', {
+              modelId: adapter.modelId,
+              error: errorMessage,
+            });
+
+            await prisma.modelResponse.create({
+              data: {
+                comparisonId,
+                modelId: adapter.modelId,
+                provider: adapter.provider,
+                status: 'error',
+                errorMessage,
+                responseTimeMs: Math.round(performance.now() - startTime),
+              },
+            });
+
+            sendEvent(SSEEventType.MODEL_ERROR, {
+              modelId: adapter.modelId,
+              comparisonId,
+              error: errorMessage,
+            });
+          }
+
+          sendEvent(SSEEventType.COMPARISON_COMPLETED, { comparisonId });
+          closeController();
+        } catch (error: unknown) {
+          console.error('[ComparisonService][regenerate][fatal]', {
+            error: extractErrorMessage(error, 'Unexpected error'),
           });
           sendEvent(SSEEventType.ERROR, {
             message: extractErrorMessage(error, 'Unexpected error'),

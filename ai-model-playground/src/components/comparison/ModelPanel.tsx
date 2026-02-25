@@ -21,7 +21,9 @@ interface ModelPanelProps {
   errorMessage?: string;
   metrics: ModelMetrics | null;
   onRetry?: (modelId: string) => void;
-  onEditResponse?: (text: string) => void;
+  onRegenerate?: (modelId: string) => void;
+  scrollRef?: (el: HTMLDivElement | null) => void;
+  onScroll?: () => void;
 }
 
 export const ModelPanel = memo(function ModelPanel({
@@ -32,7 +34,9 @@ export const ModelPanel = memo(function ModelPanel({
   errorMessage,
   metrics,
   onRetry,
-  onEditResponse,
+  onRegenerate,
+  scrollRef,
+  onScroll,
 }: ModelPanelProps) {
   const [copied, setCopied] = useState(false);
   const modelName = MODEL_DISPLAY_NAMES[modelId] || modelId;
@@ -69,31 +73,7 @@ export const ModelPanel = memo(function ModelPanel({
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {(status === ModelStatus.STREAMING || status === ModelStatus.COMPLETED) && (
-              <>
-                <button
-                  type="button"
-                  onClick={handleCopy}
-                  title="Copy message"
-                  className="rounded-md px-2 py-1 text-xs text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-                >
-                  {copied ? '✓' : '⧉'}
-                </button>
-                {onEditResponse && responseText.trim() && (
-                  <button
-                    type="button"
-                    onClick={() => onEditResponse(responseText)}
-                    title="Edit message"
-                    className="rounded-md px-2 py-1 text-xs text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-                  >
-                    ✎
-                  </button>
-                )}
-              </>
-            )}
-            <StatusBadge status={status} />
-          </div>
+          <StatusBadge status={status} />
         </div>
       </CardHeader>
 
@@ -108,6 +88,8 @@ export const ModelPanel = memo(function ModelPanel({
           <StreamingResponse
             text={responseText}
             isStreaming={status === ModelStatus.STREAMING}
+            scrollRef={scrollRef}
+            onScroll={onScroll}
           />
         )}
 
@@ -134,7 +116,36 @@ export const ModelPanel = memo(function ModelPanel({
         )}
       </CardBody>
 
-      <CardFooter className="shrink-0">
+      <CardFooter className="shrink-0 space-y-2">
+        {(status === ModelStatus.COMPLETED || status === ModelStatus.STREAMING) && (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={handleCopy}
+              title="Copy response"
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+                <path d="M7 3.5A1.5 1.5 0 0 1 8.5 2h3.879a1.5 1.5 0 0 1 1.06.44l3.122 3.12A1.5 1.5 0 0 1 17 6.622V12.5a1.5 1.5 0 0 1-1.5 1.5h-1v-3.379a3 3 0 0 0-.879-2.121L10.5 5.379A3 3 0 0 0 8.379 4.5H7v-1Z" />
+                <path d="M4.5 6A1.5 1.5 0 0 0 3 7.5v9A1.5 1.5 0 0 0 4.5 18h7a1.5 1.5 0 0 0 1.5-1.5v-5.879a1.5 1.5 0 0 0-.44-1.06L9.44 6.439A1.5 1.5 0 0 0 8.378 6H4.5Z" />
+              </svg>
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
+            {onRegenerate && status === ModelStatus.COMPLETED && (
+              <button
+                type="button"
+                onClick={() => onRegenerate(modelId)}
+                title="Regenerate response"
+                className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+                  <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.433a.75.75 0 0 0 0-1.5H4.598a.75.75 0 0 0-.75.75v3.634a.75.75 0 0 0 1.5 0v-2.033l.312.311a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm-10.624-2.85a5.5 5.5 0 0 1 9.201-2.465l.312.31H11.768a.75.75 0 0 0 0 1.5h3.634a.75.75 0 0 0 .75-.75V3.534a.75.75 0 0 0-1.5 0v2.033l-.312-.311A7 7 0 0 0 2.64 8.395a.75.75 0 0 0 1.448.39Z" clipRule="evenodd" />
+                </svg>
+                Regenerate
+              </button>
+            )}
+          </div>
+        )}
         <MetricsDisplay metrics={metrics} status={status} />
       </CardFooter>
     </Card>

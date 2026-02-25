@@ -1,14 +1,16 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
 import { selectIsAuthenticated, selectCurrentUser, clearCredentials } from '@/store/slices/authSlice';
 import { useLogoutMutation } from '@/store/api/authApi';
+import { baseApi } from '@/store/api/baseApi';
 import { Button } from '@/components/ui/Button';
 
 export function Header() {
   const pathname = usePathname();
+  const router = useRouter();
   const dispatch = useAppDispatch();
   const isAuthenticated = useAppSelector(selectIsAuthenticated);
   const user = useAppSelector(selectCurrentUser);
@@ -21,13 +23,14 @@ export function Header() {
       // Logout on client side even if server fails
     } finally {
       dispatch(clearCredentials());
+      dispatch(baseApi.util.resetApiState());
+      router.replace('/login');
     }
   };
 
   const navLinks = [
     { href: '/', label: 'Home' },
     { href: '/compare', label: 'Compare' },
-    ...(isAuthenticated ? [{ href: '/history', label: 'History' }] : []),
   ];
 
   return (
