@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { Prisma } from '@prisma/generated';
+import { Prisma } from '@prisma/client';
 import { HttpStatus } from '@/types/enums';
 import { AppError } from '@/lib/utils/errors';
 

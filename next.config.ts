@@ -1,16 +1,15 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
-  // Prisma uses native binaries that Next.js bundling breaks.
-  // Marking as external prevents webpack from inlining them so the
-  // binary loader can find the .so.node file at runtime.
+  // Prevent webpack from bundling the Prisma client so the native query-engine
+  // binary (.so.node) is resolved from node_modules at runtime on Vercel.
   serverExternalPackages: ['@prisma/client', '@prisma/adapter-pg'],
 
-  // Copy the entire generated Prisma client (including the
-  // rhel-openssl-3.0.x query-engine binary) into the Vercel Lambda
-  // output so it is available under /var/task at runtime.
+  // Explicitly include the Prisma engine binary in Vercel Lambda output.
+  // `prisma generate` writes the .so.node file to node_modules/.prisma/client/
+  // but Next.js output-file tracing can miss dot-prefixed directories.
   outputFileTracingIncludes: {
-    '/**': ['./generated/prisma/**/*'],
+    '/api/**/*': ['./node_modules/.prisma/**/*.node'],
   },
 };
 
