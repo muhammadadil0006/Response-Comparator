@@ -41,7 +41,6 @@ yarn-error.log*
 next-env.d.ts
 
 # Prisma
-prisma/migrations/
 generated/
 ai-model-playground-srs-v2.md
 implementation-guide-v2.md
