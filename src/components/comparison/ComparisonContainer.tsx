@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
 import { selectIsAuthenticated } from '@/store/slices/authSlice';
 import {
@@ -24,7 +25,11 @@ import { DEFAULT_MODELS } from '@/types/models';
 import { ModelStatus, MODEL_ID_TO_PROVIDER, ResponseStatus, SSEEventType } from '@/types/enums';
 import { API_BASE_URL, API_ENDPOINTS } from '@/config/api-endpoints';
 import { extractErrorMessage } from '@/lib/utils/errors';
-import { useListComparisonsQuery, useDeleteComparisonMutation } from '@/store/api/comparisonApi';
+import {
+  useListComparisonsQuery,
+  useDeleteComparisonMutation,
+  useGetComparisonQuery,
+} from '@/store/api/comparisonApi';
 import type { Comparison, SSEDataPayload } from '@/types/comparison';
 
 const ANONYMOUS_CHAT_HISTORY_KEY = 'anonymous_chat_history_v1';
@@ -38,19 +43,50 @@ function getProviderForModel(modelId: string): string {
   );
 }
 
-export function ComparisonContainer() {
+interface ComparisonContainerProps {
+  /** When set, preloads this comparison ID from the URL (e.g. /compare/[id]) */
+  initialComparisonId?: string;
+}
+
+export function ComparisonContainer({ initialComparisonId }: ComparisonContainerProps = {}) {
   const dispatch = useAppDispatch();
+  const router = useRouter();
   const isAuthenticated = useAppSelector(selectIsAuthenticated);
   const { isLoading, models, currentPrompt, comparisonId: currentComparisonId, syncScroll } = useAppSelector((state) => state.comparison);
   const lastPromptRef = useRef<string>('');
   const abortControllerRef = useRef<AbortController | null>(null);
+  const initializedRef = useRef(false);
   const [promptDraft, setPromptDraft] = useState('');
   const [localHistory, setLocalHistory] = useState<Comparison[]>([]);
   const [deleteComparison] = useDeleteComparisonMutation();
-  const { data: authenticatedHistory, refetch: refetchHistory } = useListComparisonsQuery(
+  const {
+    data: authenticatedHistory,
+    refetch: refetchHistory,
+    isUninitialized: historyQueryUninitialized,
+  } = useListComparisonsQuery(
     { limit: 20, offset: 0 },
     { skip: !isAuthenticated }
   );
+
+  // Fetch the comparison from the URL param (e.g. /compare/[id])
+  const { data: initialComparison } = useGetComparisonQuery(
+    initialComparisonId ?? '',
+    { skip: !initialComparisonId }
+  );
+
+  // Hydrate Redux state once when the comparison data arrives
+  useEffect(() => {
+    if (!initialComparison || initializedRef.current) return;
+    initializedRef.current = true;
+    dispatch(
+      setComparisonFromHistory({
+        comparisonId: initialComparison.comparison_id,
+        prompt: initialComparison.prompt,
+        responses: initialComparison.responses,
+      })
+    );
+    lastPromptRef.current = initialComparison.prompt;
+  }, [initialComparison, dispatch]);
 
   useEffect(() => {
     if (isAuthenticated) return;
@@ -95,7 +131,8 @@ export function ComparisonContainer() {
     dispatch(resetComparison());
     setPromptDraft('');
     lastPromptRef.current = '';
-  }, [dispatch]);
+    router.push('/compare');
+  }, [dispatch, router]);
 
   const openChat = useCallback(
     (chat: Comparison) => {
@@ -108,8 +145,10 @@ export function ComparisonContainer() {
       );
       setPromptDraft('');
       lastPromptRef.current = chat.prompt;
+      // Sync the URL so the link is shareable/bookmarkable
+      router.push(`/compare/${chat.comparison_id}`);
     },
-    [dispatch]
+    [dispatch, router]
   );
 
   const handleSubmit = useCallback(
@@ -160,12 +199,20 @@ export function ComparisonContainer() {
         );
       }
 
-      // Abort any in-flight request before starting a new one
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
+      // Abort any in-flight request before starting a new one.
+      // For single-model retries, keep the original stream alive so other
+      // panels continue rendering; only abort on full new-prompt submissions.
+      if (!options?.isRetry) {
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort('superseded');
+        }
       }
       const abortController = new AbortController();
-      abortControllerRef.current = abortController;
+      if (!options?.isRetry) {
+        abortControllerRef.current = abortController;
+      }
+
+      let wasSuperseded = false;
 
       try {
         const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.COMPARISONS}`, {
@@ -383,27 +430,49 @@ export function ComparisonContainer() {
           }
         }
       } catch (error: unknown) {
-        console.error('Comparison error:', error);
-        selectedModels.forEach((modelId) => {
-          modelAccumulator[modelId] = {
-            ...(modelAccumulator[modelId] || {
-              provider: getProviderForModel(modelId),
-              responseText: '',
-              status: ModelStatus.IDLE,
-            }),
-            status: ModelStatus.ERROR,
-            errorMessage: extractErrorMessage(error, 'Failed to connect to server'),
-          };
+        // If this request was superseded by a new submission, silently discard —
+        // the new comparison's startComparison already reset the Redux state.
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          wasSuperseded = true;
+        } else {
+          console.error('Comparison error:', error);
+          selectedModels.forEach((modelId) => {
+            modelAccumulator[modelId] = {
+              ...(modelAccumulator[modelId] || {
+                provider: getProviderForModel(modelId),
+                responseText: '',
+                status: ModelStatus.IDLE,
+              }),
+              status: ModelStatus.ERROR,
+              errorMessage: extractErrorMessage(error, 'Failed to connect to server'),
+            };
 
-          dispatch(
-            modelError({
-              modelId,
-              error: extractErrorMessage(error, 'Failed to connect to server'),
-            })
-          );
-        });
+            dispatch(
+              modelError({
+                modelId,
+                error: extractErrorMessage(error, 'Failed to connect to server'),
+              })
+            );
+          });
+        }
       } finally {
-        dispatch(comparisonCompleted());
+        if (wasSuperseded) return; // new submission took over — skip cleanup
+
+        // For single-model retries the original multi-model stream owns isLoading;
+        // calling comparisonCompleted() here would prematurely unset it while
+        // the other panels are still streaming.
+        if (!options?.isRetry) {
+          dispatch(comparisonCompleted());
+
+          // Update the URL to reflect the saved comparison (skip local/anon drafts)
+          if (
+            completedComparisonId &&
+            !completedComparisonId.startsWith('local-') &&
+            !completedComparisonId.startsWith('anon-')
+          ) {
+            router.replace(`/compare/${completedComparisonId}`);
+          }
+        }
 
         // Build the completed comparison object for local history
         const completedComparison: Comparison = {
@@ -497,19 +566,25 @@ export function ComparisonContainer() {
           });
         }
 
-        // Refetch server-side history if authenticated
-        if (isAuthenticated) {
+        // Refetch server-side history if authenticated and the query has
+        // already been started (avoids "Cannot refetch an uninitialized query").
+        if (isAuthenticated && !historyQueryUninitialized) {
           refetchHistory();
         }
       }
     },
-    [dispatch, isAuthenticated, currentComparisonId, refetchHistory]
+    [dispatch, isAuthenticated, currentComparisonId, refetchHistory, router]
   );
 
   const handleRetry = useCallback((modelId: string) => {
     const prompt = lastPromptRef.current || currentPrompt;
     if (prompt) {
-      handleSubmit(prompt, [modelId], { isRetry: true, comparisonId: currentComparisonId || undefined });
+      // Never pass 'pending' — it's a placeholder set before the server assigns a real UUID
+      const safeComparisonId =
+        currentComparisonId && currentComparisonId !== 'pending'
+          ? currentComparisonId
+          : undefined;
+      handleSubmit(prompt, [modelId], { isRetry: true, comparisonId: safeComparisonId });
     }
   }, [handleSubmit, currentPrompt, currentComparisonId]);
 

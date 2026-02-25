@@ -23,7 +23,13 @@ export const ComparisonSchema = z.object({
   models: z.array(z.string()).min(1).max(3).optional(),
   stream: z.boolean().optional().default(true),
   save: z.boolean().optional().default(false),
-  comparisonId: z.string().optional(),
+  comparisonId: z
+    .string()
+    .regex(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      'Invalid comparison ID format'
+    )
+    .optional(),
 });
 
 export type LoginInput = z.infer<typeof LoginSchema>;
