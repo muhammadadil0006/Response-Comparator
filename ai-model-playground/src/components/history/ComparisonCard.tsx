@@ -6,7 +6,7 @@ import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useDeleteComparisonMutation } from '@/store/api/comparisonApi';
 import { useAppDispatch } from '@/store/hooks';
-import { setComparisonFromHistory } from '@/store/slices/comparisonSlice';
+import { loadFromHistory } from '@/store/slices/comparisonSlice';
 import type { Comparison } from '@/types/comparison';
 import {
   MODEL_DISPLAY_NAMES,
@@ -27,7 +27,7 @@ export function ComparisonCard({ comparison }: ComparisonCardProps) {
 
   const handleView = () => {
     dispatch(
-      setComparisonFromHistory({
+      loadFromHistory({
         comparisonId: comparison.comparison_id,
         prompt: comparison.prompt,
         responses: comparison.responses,

@@ -38,6 +38,83 @@ export interface ComparisonResult {
   }>;
 }
 
+/**
+ * Ensure a comparison row exists; recreate if it was deleted.
+ */
+async function ensureComparison(
+  comparisonId: string,
+  prompt: string,
+  ctx?: { userId?: string | null }
+): Promise<{ id: string; existed: boolean }> {
+  const existing = await prisma.comparison.findUnique({
+    where: { id: comparisonId },
+    select: { id: true },
+  });
+
+  if (existing) {
+    return { id: existing.id, existed: true };
+  }
+
+  // Comparison was deleted or never existed — recreate
+  const created = await prisma.comparison.create({
+    data: {
+      id: comparisonId,
+      userId: ctx?.userId ?? null,
+      prompt,
+      saved: true,
+    },
+  });
+  return { id: created.id, existed: false };
+}
+
+/** Upsert a model response using the @@unique([comparisonId, modelId]) constraint. */
+async function upsertModelResponse(data: {
+  comparisonId: string;
+  modelId: string;
+  provider: string;
+  responseText?: string;
+  status: string;
+  errorMessage?: string;
+  responseTimeMs?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  estimatedCost?: number;
+}) {
+  return prisma.modelResponse.upsert({
+    where: {
+      comparisonId_modelId: {
+        comparisonId: data.comparisonId,
+        modelId: data.modelId,
+      },
+    },
+    create: {
+      comparisonId: data.comparisonId,
+      modelId: data.modelId,
+      provider: data.provider,
+      responseText: data.responseText ?? null,
+      status: data.status,
+      errorMessage: data.errorMessage ?? null,
+      responseTimeMs: data.responseTimeMs ?? null,
+      promptTokens: data.promptTokens ?? null,
+      completionTokens: data.completionTokens ?? null,
+      totalTokens: data.totalTokens ?? null,
+      estimatedCost: data.estimatedCost ?? null,
+    },
+    update: {
+      provider: data.provider,
+      responseText: data.responseText ?? null,
+      status: data.status,
+      errorMessage: data.errorMessage ?? null,
+      responseTimeMs: data.responseTimeMs ?? null,
+      promptTokens: data.promptTokens ?? null,
+      completionTokens: data.completionTokens ?? null,
+      totalTokens: data.totalTokens ?? null,
+      estimatedCost: data.estimatedCost ?? null,
+    },
+  });
+}
+
 export class ComparisonService {
   async executeComparison(
     prompt: string,
@@ -65,20 +142,18 @@ export class ComparisonService {
             response.completionTokens
           );
 
-          // Save response to DB
-          await prisma.modelResponse.create({
-            data: {
-              comparisonId: comparison.id,
-              modelId: adapter.modelId,
-              provider: adapter.provider,
-              responseText: response.text,
-              status: 'completed',
-              responseTimeMs: response.responseTimeMs,
-              promptTokens: response.promptTokens,
-              completionTokens: response.completionTokens,
-              totalTokens: response.totalTokens,
-              estimatedCost: cost,
-            },
+          // Save response to DB (upsert for idempotency)
+          await upsertModelResponse({
+            comparisonId: comparison.id,
+            modelId: adapter.modelId,
+            provider: adapter.provider,
+            responseText: response.text,
+            status: 'completed',
+            responseTimeMs: response.responseTimeMs,
+            promptTokens: response.promptTokens,
+            completionTokens: response.completionTokens,
+            totalTokens: response.totalTokens,
+            estimatedCost: cost,
           });
 
           return {
@@ -101,15 +176,13 @@ export class ComparisonService {
             rawError: error,
           });
 
-          await prisma.modelResponse.create({
-            data: {
-              comparisonId: comparison.id,
-              modelId: adapter.modelId,
-              provider: adapter.provider,
-              status: 'error',
-              errorMessage,
-              responseTimeMs: 0,
-            },
+          await upsertModelResponse({
+            comparisonId: comparison.id,
+            modelId: adapter.modelId,
+            provider: adapter.provider,
+            status: 'error',
+            errorMessage,
+            responseTimeMs: 0,
           });
 
           return {
@@ -185,7 +258,7 @@ export class ComparisonService {
         };
 
         try {
-          // Always create comparison record in the DB
+          // Create comparison record
           const comparison = await prisma.comparison.create({
             data: {
               userId,
@@ -285,20 +358,18 @@ export class ComparisonService {
                     completionTokens
                   );
 
-                  // Save completed response to DB independently
-                  await prisma.modelResponse.create({
-                    data: {
-                      comparisonId: comparison.id,
-                      modelId: adapter.modelId,
-                      provider: adapter.provider,
-                      responseText: fullText,
-                      status: 'completed',
-                      responseTimeMs,
-                      promptTokens,
-                      completionTokens,
-                      totalTokens,
-                      estimatedCost,
-                    },
+                  // Save completed response to DB (upsert for idempotency)
+                  await upsertModelResponse({
+                    comparisonId: comparison.id,
+                    modelId: adapter.modelId,
+                    provider: adapter.provider,
+                    responseText: fullText,
+                    status: 'completed',
+                    responseTimeMs,
+                    promptTokens,
+                    completionTokens,
+                    totalTokens,
+                    estimatedCost,
                   });
 
                   sendEvent(SSEEventType.MODEL_COMPLETED, {
@@ -333,18 +404,16 @@ export class ComparisonService {
                     attempt,
                   });
 
-                  // Save error response to DB independently
-                  await prisma.modelResponse.create({
-                    data: {
-                      comparisonId: comparison.id,
-                      modelId: adapter.modelId,
-                      provider: adapter.provider,
-                      status: 'error',
-                      errorMessage,
-                      responseTimeMs: Math.round(
-                        performance.now() - startTime
-                      ),
-                    },
+                  // Save error response to DB (upsert for idempotency)
+                  await upsertModelResponse({
+                    comparisonId: comparison.id,
+                    modelId: adapter.modelId,
+                    provider: adapter.provider,
+                    status: 'error',
+                    errorMessage,
+                    responseTimeMs: Math.round(
+                      performance.now() - startTime
+                    ),
                   });
 
                   sendEvent(SSEEventType.MODEL_ERROR, {
@@ -385,7 +454,8 @@ export class ComparisonService {
   updateComparisonStreaming(
     comparisonId: string,
     prompt: string,
-    models: string[] = DEFAULT_MODELS
+    models: string[] = DEFAULT_MODELS,
+    ctx?: { userId?: string | null }
   ): ReadableStream {
     const encoder = new TextEncoder();
 
@@ -415,6 +485,9 @@ export class ComparisonService {
         };
 
         try {
+          // Verify comparison exists (recreate if deleted)
+          const ensured = await ensureComparison(comparisonId, prompt, ctx);
+
           // Delete ALL old responses and update the prompt
           await prisma.modelResponse.deleteMany({
             where: { comparisonId },
@@ -491,19 +564,17 @@ export class ComparisonService {
                   const totalTokens = streamUsage?.totalTokens ?? (promptTokens + completionTokens);
                   const estimatedCost = adapter.calculateCost(promptTokens, completionTokens);
 
-                  await prisma.modelResponse.create({
-                    data: {
-                      comparisonId,
-                      modelId: adapter.modelId,
-                      provider: adapter.provider,
-                      responseText: fullText,
-                      status: 'completed',
-                      responseTimeMs,
-                      promptTokens,
-                      completionTokens,
-                      totalTokens,
-                      estimatedCost,
-                    },
+                  await upsertModelResponse({
+                    comparisonId,
+                    modelId: adapter.modelId,
+                    provider: adapter.provider,
+                    responseText: fullText,
+                    status: 'completed',
+                    responseTimeMs,
+                    promptTokens,
+                    completionTokens,
+                    totalTokens,
+                    estimatedCost,
                   });
 
                   sendEvent(SSEEventType.MODEL_COMPLETED, {
@@ -533,15 +604,13 @@ export class ComparisonService {
                     attempt,
                   });
 
-                  await prisma.modelResponse.create({
-                    data: {
-                      comparisonId,
-                      modelId: adapter.modelId,
-                      provider: adapter.provider,
-                      status: 'error',
-                      errorMessage,
-                      responseTimeMs: Math.round(performance.now() - startTime),
-                    },
+                  await upsertModelResponse({
+                    comparisonId,
+                    modelId: adapter.modelId,
+                    provider: adapter.provider,
+                    status: 'error',
+                    errorMessage,
+                    responseTimeMs: Math.round(performance.now() - startTime),
                   });
 
                   sendEvent(SSEEventType.MODEL_ERROR, {
@@ -578,7 +647,8 @@ export class ComparisonService {
   regenerateModelStreaming(
     comparisonId: string,
     prompt: string,
-    modelId: string
+    modelId: string,
+    ctx?: { userId?: string | null }
   ): ReadableStream {
     const encoder = new TextEncoder();
 
@@ -608,7 +678,10 @@ export class ComparisonService {
         };
 
         try {
-          // Delete old response for this model in this comparison
+          // Verify comparison exists (recreate if deleted)
+          const ensured = await ensureComparison(comparisonId, prompt, ctx);
+
+          // Delete old response for THIS model only — other models are untouched
           await prisma.modelResponse.deleteMany({
             where: { comparisonId, modelId },
           });
@@ -677,19 +750,17 @@ export class ComparisonService {
               const totalTokens = streamUsage?.totalTokens ?? (promptTokens + completionTokens);
               const estimatedCost = adapter.calculateCost(promptTokens, completionTokens);
 
-              await prisma.modelResponse.create({
-                data: {
-                  comparisonId,
-                  modelId: adapter.modelId,
-                  provider: adapter.provider,
-                  responseText: fullText,
-                  status: 'completed',
-                  responseTimeMs,
-                  promptTokens,
-                  completionTokens,
-                  totalTokens,
-                  estimatedCost,
-                },
+              await upsertModelResponse({
+                comparisonId,
+                modelId: adapter.modelId,
+                provider: adapter.provider,
+                responseText: fullText,
+                status: 'completed',
+                responseTimeMs,
+                promptTokens,
+                completionTokens,
+                totalTokens,
+                estimatedCost,
               });
 
               sendEvent(SSEEventType.MODEL_COMPLETED, {
@@ -719,15 +790,13 @@ export class ComparisonService {
                 attempt,
               });
 
-              await prisma.modelResponse.create({
-                data: {
-                  comparisonId,
-                  modelId: adapter.modelId,
-                  provider: adapter.provider,
-                  status: 'error',
-                  errorMessage,
-                  responseTimeMs: Math.round(performance.now() - startTime),
-                },
+              await upsertModelResponse({
+                comparisonId,
+                modelId: adapter.modelId,
+                provider: adapter.provider,
+                status: 'error',
+                errorMessage,
+                responseTimeMs: Math.round(performance.now() - startTime),
               });
 
               sendEvent(SSEEventType.MODEL_ERROR, {

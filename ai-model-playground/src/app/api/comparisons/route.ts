@@ -46,7 +46,8 @@ export async function POST(request: NextRequest) {
       const readableStream = comparisonService.regenerateModelStreaming(
         comparisonId,
         prompt,
-        selectedModels[0]
+        selectedModels[0],
+        { userId }
       );
 
       return new Response(readableStream, {
@@ -65,7 +66,8 @@ export async function POST(request: NextRequest) {
       const readableStream = comparisonService.updateComparisonStreaming(
         comparisonId,
         prompt,
-        selectedModels
+        selectedModels,
+        { userId }
       );
 
       return new Response(readableStream, {

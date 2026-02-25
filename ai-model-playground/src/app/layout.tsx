@@ -19,7 +19,7 @@ export default function RootLayout({
       <body className="min-h-screen flex flex-col bg-gray-50 dark:bg-gray-950">
         <Providers>
           <Header />
-          <main className="flex-1 w-full px-4 py-8 sm:px-6 lg:px-8">
+          <main className="flex-1 w-full min-h-0">
             {children}
           </main>
           <Footer />

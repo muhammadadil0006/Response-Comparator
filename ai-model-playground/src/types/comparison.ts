@@ -56,6 +56,7 @@ export interface StreamEvent {
 /** Shape of SSE data payloads received from the comparison stream */
 export interface SSEDataPayload {
   comparisonId?: string;
+
   models?: string[];
   modelId?: string;
   provider?: string;

@@ -13,6 +13,12 @@ declare global {
   var prismaGlobal: undefined | ReturnType<typeof prismaClientSingleton>;
 }
 
+// Invalidate cached client if it doesn't have expected model delegates
+// (happens after schema changes + prisma generate while dev server is running)
+if (globalThis.prismaGlobal && !('comparison' in globalThis.prismaGlobal)) {
+  globalThis.prismaGlobal = undefined;
+}
+
 export const prisma = globalThis.prismaGlobal ?? prismaClientSingleton();
 
 if (process.env.NODE_ENV !== 'production') {

@@ -1,678 +1,105 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
 import { selectIsAuthenticated } from '@/store/slices/authSlice';
-import {
-  setPrompt,
-  startComparison,
-  updateComparisonId,
-  modelStarted,
-  appendChunk,
-  modelCompleted,
-  modelError,
-  addToolCall,
-  resetModelForRetry,
-  comparisonCompleted,
-  resetComparison,
-  setComparisonFromHistory,
-  toggleSyncScroll,
-} from '@/store/slices/comparisonSlice';
-import { PromptInput } from '@/components/comparison/PromptInput';
-import { ComparisonView } from '@/components/comparison/ComparisonView';
-import { DEFAULT_MODELS } from '@/types/models';
-import { ModelStatus, MODEL_ID_TO_PROVIDER, ResponseStatus, SSEEventType } from '@/types/enums';
-import { API_BASE_URL, API_ENDPOINTS } from '@/config/api-endpoints';
-import { extractErrorMessage } from '@/lib/utils/errors';
-import { useListComparisonsQuery, useDeleteComparisonMutation } from '@/store/api/comparisonApi';
-import type { Comparison, SSEDataPayload } from '@/types/comparison';
+import { toggleSyncScroll } from '@/store/slices/comparisonSlice';
+import { useComparisonHistory } from '@/hooks/useComparisonHistory';
+import { useStreamingComparison } from '@/hooks/useStreamingComparison';
+import { ChatSidebar } from '@/components/comparison/ChatSidebar';
+import { ChatArea } from '@/components/comparison/ChatArea';
+import { ChatBottomBar } from '@/components/comparison/ChatBottomBar';
+import { WelcomeScreen } from '@/components/comparison/WelcomeScreen';
 
-const ANONYMOUS_CHAT_HISTORY_KEY = 'anonymous_chat_history_v1';
-const MAX_ANONYMOUS_CHATS = 20;
-
-function getProviderForModel(modelId: string): string {
-  return (
-    MODEL_ID_TO_PROVIDER[modelId as keyof typeof MODEL_ID_TO_PROVIDER] ||
-    modelId.split('/')[0] ||
-    'unknown'
-  );
-}
-
+/**
+ * Thin orchestrator — wires hooks and dumb/smart components together.
+ * Single-comparison mode: one prompt → three model responses.
+ */
 export function ComparisonContainer() {
   const dispatch = useAppDispatch();
   const isAuthenticated = useAppSelector(selectIsAuthenticated);
-  const { isLoading, models, currentPrompt, comparisonId: currentComparisonId, syncScroll } = useAppSelector((state) => state.comparison);
-  const lastPromptRef = useRef<string>('');
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const [promptDraft, setPromptDraft] = useState('');
-  const [localHistory, setLocalHistory] = useState<Comparison[]>([]);
-  const [deleteComparison] = useDeleteComparisonMutation();
-  const { data: authenticatedHistory, refetch: refetchHistory } = useListComparisonsQuery(
-    { limit: 20, offset: 0 },
-    { skip: !isAuthenticated }
+  const isLoading = useAppSelector((s) => s.comparison.isLoading);
+  const hasComparison = useAppSelector(
+    (s) => Object.keys(s.comparison.models).length > 0,
   );
+  const syncScroll = useAppSelector((s) => s.comparison.syncScroll);
 
-  useEffect(() => {
-    if (isAuthenticated) return;
+  const [promptDraft, setPromptDraft] = useState('');
 
-    try {
-      const raw = localStorage.getItem(ANONYMOUS_CHAT_HISTORY_KEY);
-      if (!raw) return;
+  // ─── Comparison history (sidebar, open, delete, persistence) ──────────
+  const {
+    sidebarComparisons,
+    comparisonId,
+    handleNewComparison: rawNew,
+    handleOpenComparison: rawOpen,
+    handleDeleteComparison,
+    persistAnonComparison,
+    handleStreamComplete,
+  } = useComparisonHistory();
 
-      const parsed = JSON.parse(raw) as Comparison[];
-      if (Array.isArray(parsed)) {
-        setLocalHistory(parsed);
-      }
-    } catch {
-      setLocalHistory([]);
-    }
-  }, [isAuthenticated]);
+  // ─── SSE streaming logic ──────────────────────────────────────────────
+  const { handleSubmit: rawSubmit, handleRetry } = useStreamingComparison({
+    onPersistAnonComparison: persistAnonComparison,
+    onStreamComplete: handleStreamComplete,
+  });
 
-  useEffect(() => {
-    if (!isAuthenticated) return;
-    setLocalHistory((previous) => previous.filter((chat) => !chat.comparison_id.startsWith('anon-')));
-  }, [isAuthenticated]);
-
-  const chatHistory = useMemo(() => {
-    if (!isAuthenticated) {
-      return localHistory;
-    }
-
-    const combined = [...localHistory, ...(authenticatedHistory?.comparisons || [])];
-    const seen = new Set<string>();
-    const deduplicated: Comparison[] = [];
-
-    for (const chat of combined) {
-      if (seen.has(chat.comparison_id)) continue;
-      seen.add(chat.comparison_id);
-      deduplicated.push(chat);
-    }
-
-    return deduplicated.slice(0, 20);
-  }, [authenticatedHistory?.comparisons, isAuthenticated, localHistory]);
-
-  const handleNewChat = useCallback(() => {
-    dispatch(resetComparison());
+  // ─── Stable UI callbacks ──────────────────────────────────────────────
+  const handleNewComparison = useCallback(() => {
+    rawNew();
     setPromptDraft('');
-    lastPromptRef.current = '';
-  }, [dispatch]);
+  }, [rawNew]);
 
-  const openChat = useCallback(
-    (chat: Comparison) => {
-      dispatch(
-        setComparisonFromHistory({
-          comparisonId: chat.comparison_id,
-          prompt: chat.prompt,
-          responses: chat.responses,
-        })
-      );
+  const handleOpenComparison = useCallback(
+    (id: string) => {
+      rawOpen(id);
       setPromptDraft('');
-      lastPromptRef.current = chat.prompt;
     },
-    [dispatch]
+    [rawOpen],
   );
 
   const handleSubmit = useCallback(
-    async (
-      prompt: string,
-      modelIds: string[] = DEFAULT_MODELS,
-      options?: { isRetry?: boolean; comparisonId?: string }
-    ) => {
-      // Determine if we should update an existing comparison
-      const existingComparisonId = options?.comparisonId || currentComparisonId;
-      const isUpdate = !options?.isRetry && !!existingComparisonId && existingComparisonId !== 'pending';
-
-      lastPromptRef.current = prompt;
+    (prompt: string) => {
       setPromptDraft('');
-      dispatch(setPrompt(prompt));
-      let selectedModels = modelIds;
-      let completedComparisonId = existingComparisonId || `local-${Date.now()}`;
-      let modelAccumulator = selectedModels.reduce<
-        Record<
-          string,
-          {
-            provider: string;
-            responseText: string;
-            status: ModelStatus;
-            errorMessage?: string;
-            metrics?: SSEDataPayload['metrics'];
-          }
-        >
-      >((accumulator, modelId) => {
-        accumulator[modelId] = {
-          provider: getProviderForModel(modelId),
-          responseText: '',
-          status: ModelStatus.IDLE,
-        };
-        return accumulator;
-      }, {});
-
-      if (options?.isRetry) {
-        selectedModels.forEach((modelId) => {
-          dispatch(resetModelForRetry({ modelId }));
-        });
-      } else {
-        dispatch(
-          startComparison({
-            comparisonId: existingComparisonId || 'pending',
-            models: selectedModels,
-          })
-        );
-      }
-
-      // Abort any in-flight request before starting a new one
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-      const abortController = new AbortController();
-      abortControllerRef.current = abortController;
-
-      try {
-        const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.COMPARISONS}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: abortController.signal,
-          body: JSON.stringify({
-            prompt,
-            models: selectedModels,
-            stream: true,
-            ...((options?.isRetry || isUpdate) && existingComparisonId
-              ? { comparisonId: existingComparisonId }
-              : {}),
-          }),
-        });
-
-        if (!response.ok) {
-          let errorPayload: unknown = null;
-
-          try {
-            errorPayload = await response.json();
-          } catch {
-            try {
-              errorPayload = await response.text();
-            } catch {
-              errorPayload = null;
-            }
-          }
-
-          const message = extractErrorMessage(
-            errorPayload,
-            response.statusText || 'Failed to execute comparison'
-          );
-
-          throw new Error(message);
-        }
-
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error('No response body');
-
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let currentEventType = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              currentEventType = line.slice(7).trim();
-              continue;
-            }
-
-            if (line.startsWith('data: ')) {
-              try {
-                const data: SSEDataPayload = JSON.parse(line.slice(6));
-
-                switch (currentEventType) {
-                  case SSEEventType.COMPARISON_STARTED:
-                    // Update comparisonId and resolved model IDs
-                    if (data.comparisonId) {
-                      completedComparisonId = data.comparisonId;
-                      // Backend sends resolved model IDs (e.g. "openai/gpt-4o")
-                      const resolvedModels = data.models || selectedModels;
-                      selectedModels = resolvedModels;
-                      // Rebuild accumulator with resolved keys
-                      modelAccumulator = resolvedModels.reduce<
-                        typeof modelAccumulator
-                      >((acc, mId) => {
-                        acc[mId] = {
-                          provider: getProviderForModel(mId),
-                          responseText: '',
-                          status: ModelStatus.IDLE,
-                        };
-                        return acc;
-                      }, {});
-                      // Use updateComparisonId to set the real ID without
-                      // wiping the models record. The initial startComparison
-                      // call (before fetch) already set up all model entries.
-                      dispatch(
-                        updateComparisonId({
-                          comparisonId: data.comparisonId,
-                        })
-                      );
-                      // Ensure model entries exist for any newly-resolved IDs
-                      // (defensive — handles ID mismatch between pre-fetch
-                      // and backend-resolved model IDs)
-                      if (!options?.isRetry) {
-                        resolvedModels.forEach((mId: string) => {
-                          dispatch(
-                            modelStarted({
-                              modelId: mId,
-                              provider: getProviderForModel(mId),
-                            })
-                          );
-                        });
-                      }
-                    }
-                    break;
-                  case SSEEventType.MODEL_STARTED:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
-                        responseText: '',
-                        status: ModelStatus.IDLE,
-                      }),
-                      provider: data.provider || getProviderForModel(data.modelId!),
-                      status: ModelStatus.STREAMING,
-                    };
-                    dispatch(
-                      modelStarted({
-                        modelId: data.modelId!,
-                        provider: data.provider!,
-                      })
-                    );
-                    break;
-                  case SSEEventType.MODEL_CHUNK:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
-                        responseText: '',
-                        status: ModelStatus.IDLE,
-                      }),
-                      responseText:
-                        (modelAccumulator[data.modelId!]?.responseText || '') + data.chunk!,
-                      status: ModelStatus.STREAMING,
-                    };
-                    dispatch(
-                      appendChunk({
-                        modelId: data.modelId!,
-                        chunk: data.chunk!,
-                      })
-                    );
-                    break;
-                  case SSEEventType.MODEL_TOOL_CALL:
-                    if (data.toolCall) {
-                      dispatch(
-                        addToolCall({
-                          modelId: data.modelId!,
-                          toolCall: data.toolCall,
-                        })
-                      );
-                    }
-                    break;
-                  case SSEEventType.MODEL_COMPLETED:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
-                        responseText: '',
-                        status: ModelStatus.IDLE,
-                      }),
-                      status: ModelStatus.COMPLETED,
-                      metrics: data.metrics,
-                    };
-                    dispatch(
-                      modelCompleted({
-                        modelId: data.modelId!,
-                        metrics: data.metrics ?? null,
-                        finishReason: data.finishReason,
-                      })
-                    );
-                    break;
-                  case SSEEventType.MODEL_ERROR:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
-                        responseText: '',
-                        status: ModelStatus.IDLE,
-                      }),
-                      status: ModelStatus.ERROR,
-                      errorMessage: extractErrorMessage(data.error, 'Unexpected error'),
-                    };
-                    dispatch(
-                      modelError({
-                        modelId: data.modelId!,
-                        error: extractErrorMessage(data.error, 'Unexpected error'),
-                        category: data.category,
-                      })
-                    );
-                    break;
-                  case SSEEventType.ERROR:
-                    selectedModels.forEach((modelId) => {
-                      modelAccumulator[modelId] = {
-                        ...(modelAccumulator[modelId] || {
-                          provider: getProviderForModel(modelId),
-                          responseText: '',
-                          status: ModelStatus.IDLE,
-                        }),
-                        status: ModelStatus.ERROR,
-                        errorMessage: extractErrorMessage(data, 'Failed to complete comparison'),
-                      };
-
-                      dispatch(
-                        modelError({
-                          modelId,
-                          error: extractErrorMessage(
-                            data,
-                            'Failed to complete comparison'
-                          ),
-                        })
-                      );
-                    });
-                    break;
-                }
-              } catch {
-                // Skip malformed JSON
-              }
-              currentEventType = '';
-            }
-          }
-        }
-      } catch (error: unknown) {
-        console.error('Comparison error:', error);
-        selectedModels.forEach((modelId) => {
-          modelAccumulator[modelId] = {
-            ...(modelAccumulator[modelId] || {
-              provider: getProviderForModel(modelId),
-              responseText: '',
-              status: ModelStatus.IDLE,
-            }),
-            status: ModelStatus.ERROR,
-            errorMessage: extractErrorMessage(error, 'Failed to connect to server'),
-          };
-
-          dispatch(
-            modelError({
-              modelId,
-              error: extractErrorMessage(error, 'Failed to connect to server'),
-            })
-          );
-        });
-      } finally {
-        dispatch(comparisonCompleted());
-
-        // Build the completed comparison object for local history
-        const completedComparison: Comparison = {
-          comparison_id: completedComparisonId.startsWith('local-')
-            ? (isAuthenticated ? completedComparisonId : `anon-${Date.now()}`)
-            : completedComparisonId,
-          user_id: null,
-          prompt,
-          saved: isAuthenticated,
-          created_at: new Date().toISOString(),
-          responses: selectedModels.map((modelId) => {
-            const model = modelAccumulator[modelId];
-
-            return {
-              model_id: modelId,
-              provider: model?.provider || getProviderForModel(modelId),
-              response_text: model?.responseText || '',
-              status:
-                model?.status === ModelStatus.ERROR
-                  ? ResponseStatus.ERROR
-                  : model?.status === ModelStatus.COMPLETED
-                    ? ResponseStatus.COMPLETED
-                    : ResponseStatus.PENDING,
-              error_message: model?.errorMessage,
-              metrics: {
-                response_time_ms: model?.metrics?.response_time_ms || 0,
-                prompt_tokens: model?.metrics?.prompt_tokens || 0,
-                completion_tokens: model?.metrics?.completion_tokens || 0,
-                total_tokens: model?.metrics?.total_tokens || 0,
-                estimated_cost: model?.metrics?.estimated_cost || 0,
-              },
-            };
-          }),
-        };
-
-        if (options?.isRetry) {
-          // Single model regenerate: update just that model in history
-          const retryModelId = selectedModels[0];
-          const retryModel = modelAccumulator[retryModelId];
-          if (retryModel) {
-            setLocalHistory((previous) => {
-              const updated = previous.map((chat) => {
-                if (chat.comparison_id !== completedComparisonId) return chat;
-                return {
-                  ...chat,
-                  responses: chat.responses.map((r) =>
-                    r.model_id === retryModelId
-                      ? {
-                          ...r,
-                          response_text: retryModel.responseText || '',
-                          status:
-                            retryModel.status === ModelStatus.ERROR
-                              ? ResponseStatus.ERROR
-                              : retryModel.status === ModelStatus.COMPLETED
-                                ? ResponseStatus.COMPLETED
-                                : ResponseStatus.PENDING,
-                          error_message: retryModel.errorMessage,
-                          metrics: {
-                            response_time_ms: retryModel.metrics?.response_time_ms || 0,
-                            prompt_tokens: retryModel.metrics?.prompt_tokens || 0,
-                            completion_tokens: retryModel.metrics?.completion_tokens || 0,
-                            total_tokens: retryModel.metrics?.total_tokens || 0,
-                            estimated_cost: retryModel.metrics?.estimated_cost || 0,
-                          },
-                        }
-                      : r
-                  ),
-                };
-              });
-              persistLocalHistory(updated);
-              return updated;
-            });
-          }
-        } else {
-          // New or update: upsert in history
-          setLocalHistory((previous) => {
-            const existingIndex = previous.findIndex(
-              (c) => c.comparison_id === completedComparison.comparison_id
-            );
-            let updatedHistory: Comparison[];
-            if (existingIndex >= 0) {
-              // Update existing entry
-              updatedHistory = [...previous];
-              updatedHistory[existingIndex] = completedComparison;
-            } else {
-              // Prepend new entry
-              updatedHistory = [completedComparison, ...previous].slice(0, MAX_ANONYMOUS_CHATS);
-            }
-            persistLocalHistory(updatedHistory);
-            return updatedHistory;
-          });
-        }
-
-        // Refetch server-side history if authenticated
-        if (isAuthenticated) {
-          refetchHistory();
-        }
-      }
+      rawSubmit(prompt);
     },
-    [dispatch, isAuthenticated, currentComparisonId, refetchHistory]
+    [rawSubmit],
   );
-
-  const handleRetry = useCallback((modelId: string) => {
-    const prompt = lastPromptRef.current || currentPrompt;
-    if (prompt) {
-      handleSubmit(prompt, [modelId], { isRetry: true, comparisonId: currentComparisonId || undefined });
-    }
-  }, [handleSubmit, currentPrompt, currentComparisonId]);
 
   const handleEditPrompt = useCallback((text: string) => {
     setPromptDraft(text);
   }, []);
 
-  const handleDeleteChat = useCallback(async (comparisonId: string) => {
-    // Remove from local history
-    setLocalHistory((previous) => {
-      const updated = previous.filter((c) => c.comparison_id !== comparisonId);
-      persistLocalHistory(updated);
-      return updated;
-    });
+  const handleToggleSyncScroll = useCallback(() => {
+    dispatch(toggleSyncScroll());
+  }, [dispatch]);
 
-    // Delete from server if authenticated
-    if (isAuthenticated) {
-      try {
-        await deleteComparison(comparisonId).unwrap();
-      } catch {
-        // Ignore — already removed locally
-      }
-    }
-
-    // If the deleted chat is the active one, reset
-    if (currentComparisonId === comparisonId) {
-      dispatch(resetComparison());
-      setPromptDraft('');
-      lastPromptRef.current = '';
-    }
-  }, [isAuthenticated, deleteComparison, currentComparisonId, dispatch]);
-
-  const persistLocalHistory = (history: Comparison[]) => {
-    if (isAuthenticated) return;
-    try {
-      localStorage.setItem(ANONYMOUS_CHAT_HISTORY_KEY, JSON.stringify(history));
-    } catch {
-      // Ignore
-    }
-  };
-
+  // ─── Render ───────────────────────────────────────────────────────────
   return (
-    <div className="grid h-[calc(100vh-8rem)] grid-cols-1 lg:grid-cols-[260px_1fr]">
-      {/* ── Sidebar ─────────────────────────────────────────── */}
-      <aside className="hidden lg:flex flex-col border-r border-gray-200 dark:border-gray-700">
-        <button
-          type="button"
-          onClick={handleNewChat}
-          className="m-3 rounded-lg border border-gray-200 px-3 py-2.5 text-left text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
-        >
-          + New chat
-        </button>
+    <div className="grid h-[calc(100vh-4rem)] grid-cols-1 lg:grid-cols-[260px_1fr]">
+      <ChatSidebar
+        comparisons={sidebarComparisons}
+        activeComparisonId={comparisonId}
+        onNewComparison={handleNewComparison}
+        onOpenComparison={handleOpenComparison}
+        onDeleteComparison={handleDeleteComparison}
+      />
 
-        <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
-          {chatHistory.length === 0 ? (
-            <p className="px-3 py-4 text-xs text-gray-500 dark:text-gray-400">
-              No chats yet
-            </p>
-          ) : (
-            chatHistory.map((chat) => {
-              const isActive = currentComparisonId === chat.comparison_id;
-              return (
-                <div
-                  key={chat.comparison_id}
-                  className={`group relative flex items-center rounded-lg transition-colors ${
-                    isActive
-                      ? 'bg-primary-50 dark:bg-primary-900/30'
-                      : 'hover:bg-gray-100 dark:hover:bg-gray-800'
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => openChat(chat)}
-                    className="min-w-0 flex-1 px-3 py-2.5 text-left text-sm"
-                  >
-                    <p className={`truncate font-medium ${
-                      isActive
-                        ? 'text-primary-700 dark:text-primary-300'
-                        : 'text-gray-700 dark:text-gray-300'
-                    }`}>{chat.prompt}</p>
-                    <p className="mt-0.5 text-[11px] text-gray-400 dark:text-gray-500">
-                      {new Date(chat.created_at).toLocaleString()}
-                    </p>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); handleDeleteChat(chat.comparison_id); }}
-                    title="Delete chat"
-                    className="mr-2 shrink-0 rounded-md p-1 text-gray-400 opacity-0 transition-opacity hover:bg-red-100 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-400"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
-                      <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.519.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.34.06a.75.75 0 1 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
-                    </svg>
-                  </button>
-                </div>
-              );
-            })
-          )}
-        </nav>
-      </aside>
-
-      {/* ── Main area ───────────────────────────────────────── */}
       <section className="relative flex flex-col overflow-hidden">
-        {Object.keys(models).length === 0 ? (
-          /* Welcome screen */
-          <div className="flex flex-1 items-center justify-center">
-            <div className="text-center">
-              <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-linear-to-br from-primary-500 to-primary-700 text-white text-xl font-bold shadow-lg">
-                AI
-              </div>
-              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white">
-                Ready when you are
-              </h2>
-              <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
-                Ask anything to compare responses across AI models
-              </p>
-            </div>
-          </div>
+        {hasComparison ? (
+          <ChatArea onRetry={handleRetry} onEditPrompt={handleEditPrompt} />
         ) : (
-          /* Chat content */
-          <div className="flex-1 overflow-y-auto px-4 py-4 pb-48 sm:px-6">
-            <ComparisonView
-              models={models}
-              currentPrompt={currentPrompt}
-              syncScroll={syncScroll}
-              onRetry={handleRetry}
-              onRegenerate={handleRetry}
-              onEditPrompt={handleEditPrompt}
-            />
-          </div>
+          <WelcomeScreen />
         )}
 
-        {/* Sticky bottom bar */}
-        <div className="absolute inset-x-0 bottom-0 z-20 border-t border-gray-200 bg-white/80 backdrop-blur-md dark:border-gray-700 dark:bg-gray-900/80">
-          <div className="mx-auto max-w-4xl px-4 py-3 sm:px-6">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                {!isAuthenticated && (
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    💡 Sign in to save comparisons
-                  </p>
-                )}
-              </div>
-              <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                <input
-                  type="checkbox"
-                  checked={syncScroll}
-                  onChange={() => dispatch(toggleSyncScroll())}
-                  className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                />
-                Sync scroll
-              </label>
-            </div>
-
-            <PromptInput
-              onSubmit={(prompt) => handleSubmit(prompt)}
-              isLoading={isLoading}
-              isAuthenticated={isAuthenticated}
-              value={promptDraft}
-              onChange={setPromptDraft}
-            />
-          </div>
-        </div>
+        <ChatBottomBar
+          isLoading={isLoading}
+          isAuthenticated={isAuthenticated}
+          syncScroll={syncScroll}
+          promptDraft={promptDraft}
+          onPromptChange={setPromptDraft}
+          onSubmit={handleSubmit}
+          onToggleSyncScroll={handleToggleSyncScroll}
+        />
       </section>
     </div>
   );

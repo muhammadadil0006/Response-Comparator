@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useEffect, useCallback } from 'react';
+import { memo, useRef, useEffect, useCallback } from 'react';
 import { MarkdownRenderer } from '@/components/comparison/MarkdownRenderer';
 import { ToolCallBlock } from '@/components/comparison/ToolCallBlock';
 
@@ -20,7 +20,7 @@ interface StreamingResponseProps {
   onScroll?: () => void;
 }
 
-export function StreamingResponse({
+export const StreamingResponse = memo(function StreamingResponse({
   text,
   isStreaming,
   provider,
@@ -109,7 +109,7 @@ export function StreamingResponse({
       )}
     </div>
   );
-}
+});
 
 /** Shows a small badge explaining why the response ended. */
 function FinishReasonBadge({ reason }: { reason: string }) {

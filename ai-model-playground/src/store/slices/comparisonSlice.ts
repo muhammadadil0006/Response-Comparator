@@ -3,6 +3,8 @@ import type { ModelResponseData, ModelMetrics } from '@/types/comparison';
 import { extractErrorMessage } from '@/lib/utils/errors';
 import { ModelStatus, ResponseStatus } from '@/types/enums';
 
+// ─── Public types ──────────────────────────────────────────────────────────────
+
 export interface ModelStreamState {
   modelId: string;
   provider: string;
@@ -15,106 +17,141 @@ export interface ModelStreamState {
   metrics: ModelMetrics | null;
 }
 
+// ─── State shape (single comparison — not multi-turn) ──────────────────────────
+
 interface ComparisonState {
-  currentPrompt: string;
-  isLoading: boolean;
+  /** Real comparison ID (UUID) once confirmed by backend */
   comparisonId: string | null;
+  /** Temporary optimistic ID before backend confirms */
+  pendingId: string | null;
+  /** The user's prompt */
+  prompt: string;
+  /** Per-model streaming state */
   models: Record<string, ModelStreamState>;
+  /** True once all models are COMPLETED or ERROR */
+  isComplete: boolean;
+  isLoading: boolean;
   syncScroll: boolean;
 }
 
 const initialState: ComparisonState = {
-  currentPrompt: '',
-  isLoading: false,
   comparisonId: null,
+  pendingId: null,
+  prompt: '',
   models: {},
+  isComplete: false,
+  isLoading: false,
   syncScroll: true,
 };
+
+// ─── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Are ALL models in a terminal state (COMPLETED or ERROR)? */
+export function allModelsDone(models: Record<string, ModelStreamState>): boolean {
+  const entries = Object.values(models);
+  if (entries.length === 0) return false;
+  return entries.every(
+    (m) => m.status === ModelStatus.COMPLETED || m.status === ModelStatus.ERROR
+  );
+}
+
+// ─── Slice ─────────────────────────────────────────────────────────────────────
 
 export const comparisonSlice = createSlice({
   name: 'comparison',
   initialState,
   reducers: {
-    setPrompt: (state, action: PayloadAction<string>) => {
-      state.currentPrompt = action.payload;
-    },
-    startComparison: (state, action: PayloadAction<{ comparisonId: string; models: string[]; prompt?: string }>) => {
+    /** Start a new comparison — resets everything */
+    startComparison: (
+      state,
+      action: PayloadAction<{ pendingId: string; prompt: string; models: string[] }>
+    ) => {
+      // Completely reset to initial + new comparison
+      state.comparisonId = null;
+      state.pendingId = action.payload.pendingId;
+      state.prompt = action.payload.prompt;
       state.isLoading = true;
-      state.comparisonId = action.payload.comparisonId;
-      if (action.payload.prompt) {
-        state.currentPrompt = action.payload.prompt;
-      }
-      // Preserve existing model entries that aren't in the new list
-      // to prevent panels from disappearing during concurrent operations.
-      const freshModels: Record<string, ModelStreamState> = {};
+      state.isComplete = false;
+      state.models = {};
       action.payload.models.forEach((modelId) => {
-        freshModels[modelId] = {
+        state.models[modelId] = {
           modelId,
-          provider: state.models[modelId]?.provider || '',
+          provider: modelId.split('/')[0] || 'unknown',
           status: ModelStatus.IDLE,
           responseText: '',
           metrics: null,
         };
       });
-      // Keep any models that already exist but aren't in the new payload
-      // (e.g. other panels during a single-model regenerate race)
-      Object.keys(state.models).forEach((existingId) => {
-        if (!freshModels[existingId]) {
-          freshModels[existingId] = state.models[existingId];
-        }
-      });
-      state.models = freshModels;
     },
-    /**
-     * Lightweight update — sets comparisonId (and optionally prompt)
-     * WITHOUT touching the models record. Used when the backend resolves
-     * a real ID for an in-flight comparison.
-     */
-    updateComparisonId: (
+
+    /** Backend confirmed real comparison ID */
+    confirmComparison: (
       state,
-      action: PayloadAction<{ comparisonId: string; prompt?: string }>
+      action: PayloadAction<{
+        comparisonId: string;
+        models?: string[];
+      }>
     ) => {
       state.comparisonId = action.payload.comparisonId;
-      if (action.payload.prompt) {
-        state.currentPrompt = action.payload.prompt;
+      state.pendingId = null;
+      if (action.payload.models) {
+        const resolvedModels: Record<string, ModelStreamState> = {};
+        action.payload.models.forEach((mid) => {
+          resolvedModels[mid] = state.models[mid] || {
+            modelId: mid,
+            provider: mid.split('/')[0] || 'unknown',
+            status: ModelStatus.IDLE,
+            responseText: '',
+            metrics: null,
+          };
+        });
+        // Keep any extras that were already tracked
+        Object.keys(state.models).forEach((id) => {
+          if (!resolvedModels[id]) resolvedModels[id] = state.models[id];
+        });
+        state.models = resolvedModels;
       }
     },
+
     modelStarted: (
       state,
       action: PayloadAction<{ modelId: string; provider: string }>
     ) => {
       const { modelId, provider } = action.payload;
       if (!state.models[modelId]) {
-        // Defensive: create the entry if it doesn't exist yet
         state.models[modelId] = {
           modelId,
-          provider,
+          provider: provider || modelId.split('/')[0] || 'unknown',
           status: ModelStatus.STREAMING,
           responseText: '',
           metrics: null,
         };
       } else {
         state.models[modelId].status = ModelStatus.STREAMING;
-        state.models[modelId].provider = provider;
+        state.models[modelId].provider = provider || state.models[modelId].provider;
       }
     },
-    appendChunk: (
+
+    /** Batch-append chunks (rAF batching — one dispatch per frame) */
+    appendChunks: (
       state,
-      action: PayloadAction<{ modelId: string; chunk: string }>
+      action: PayloadAction<{ chunks: Array<{ modelId: string; chunk: string }> }>
     ) => {
-      const { modelId, chunk } = action.payload;
-      if (!state.models[modelId]) {
-        state.models[modelId] = {
-          modelId,
-          provider: '',
-          status: ModelStatus.STREAMING,
-          responseText: chunk,
-          metrics: null,
-        };
-      } else {
-        state.models[modelId].responseText += chunk;
+      for (const { modelId, chunk } of action.payload.chunks) {
+        if (!state.models[modelId]) {
+          state.models[modelId] = {
+            modelId,
+            provider: modelId.split('/')[0] || 'unknown',
+            status: ModelStatus.STREAMING,
+            responseText: chunk,
+            metrics: null,
+          };
+        } else {
+          state.models[modelId].responseText += chunk;
+        }
       }
     },
+
     modelCompleted: (
       state,
       action: PayloadAction<{
@@ -127,10 +164,10 @@ export const comparisonSlice = createSlice({
       if (!state.models[modelId]) {
         state.models[modelId] = {
           modelId,
-          provider: '',
+          provider: modelId.split('/')[0] || 'unknown',
           status: ModelStatus.COMPLETED,
           responseText: '',
-          metrics: metrics,
+          metrics,
         };
       } else {
         state.models[modelId].status = ModelStatus.COMPLETED;
@@ -140,6 +177,7 @@ export const comparisonSlice = createSlice({
         state.models[modelId].finishReason = finishReason;
       }
     },
+
     modelError: (
       state,
       action: PayloadAction<{ modelId: string; error: string; category?: string }>
@@ -148,7 +186,7 @@ export const comparisonSlice = createSlice({
       if (!state.models[modelId]) {
         state.models[modelId] = {
           modelId,
-          provider: '',
+          provider: modelId.split('/')[0] || 'unknown',
           status: ModelStatus.ERROR,
           responseText: '',
           errorMessage: error,
@@ -158,9 +196,11 @@ export const comparisonSlice = createSlice({
       } else {
         state.models[modelId].status = ModelStatus.ERROR;
         state.models[modelId].errorMessage = error;
-        state.models[modelId].errorCategory = (category as ModelStreamState['errorCategory']) || 'unknown';
+        state.models[modelId].errorCategory =
+          (category as ModelStreamState['errorCategory']) || 'unknown';
       }
     },
+
     addToolCall: (
       state,
       action: PayloadAction<{
@@ -172,7 +212,7 @@ export const comparisonSlice = createSlice({
       if (!state.models[modelId]) {
         state.models[modelId] = {
           modelId,
-          provider: '',
+          provider: modelId.split('/')[0] || 'unknown',
           status: ModelStatus.STREAMING,
           responseText: '',
           toolCalls: [toolCall],
@@ -185,10 +225,14 @@ export const comparisonSlice = createSlice({
         state.models[modelId].toolCalls!.push(toolCall);
       }
     },
+
+    /** Reset a single model for retry */
     resetModelForRetry: (
       state,
       action: PayloadAction<{ modelId: string }>
     ) => {
+      state.isLoading = true;
+      state.isComplete = false;
       const model = state.models[action.payload.modelId];
       if (model) {
         model.status = ModelStatus.PENDING;
@@ -199,10 +243,15 @@ export const comparisonSlice = createSlice({
         model.metrics = null;
       }
     },
+
+    /** Mark comparison as complete */
     comparisonCompleted: (state) => {
+      state.isComplete = true;
       state.isLoading = false;
     },
-    setComparisonFromHistory: (
+
+    /** Load a completed comparison from history */
+    loadFromHistory: (
       state,
       action: PayloadAction<{
         comparisonId: string;
@@ -211,23 +260,31 @@ export const comparisonSlice = createSlice({
       }>
     ) => {
       state.comparisonId = action.payload.comparisonId;
-      state.currentPrompt = action.payload.prompt;
+      state.pendingId = null;
+      state.prompt = action.payload.prompt;
       state.isLoading = false;
-      state.models = {};
-      action.payload.responses.forEach((responseData) => {
-        state.models[responseData.model_id] = {
-          modelId: responseData.model_id,
-          provider: responseData.provider,
-          status: responseData.status === ResponseStatus.ERROR
-            ? ModelStatus.ERROR
-            : ModelStatus.COMPLETED,
-          responseText: responseData.response_text,
-          errorMessage: extractErrorMessage(responseData.error_message, ''),
-          metrics: responseData.metrics,
-        };
-      });
+      state.isComplete = true;
+      state.models = action.payload.responses.reduce<Record<string, ModelStreamState>>(
+        (acc, r) => {
+          acc[r.model_id] = {
+            modelId: r.model_id,
+            provider: r.provider,
+            status:
+              r.status === ResponseStatus.ERROR
+                ? ModelStatus.ERROR
+                : ModelStatus.COMPLETED,
+            responseText: r.response_text,
+            errorMessage: extractErrorMessage(r.error_message, ''),
+            metrics: r.metrics,
+          };
+          return acc;
+        },
+        {}
+      );
     },
+
     resetComparison: () => initialState,
+
     toggleSyncScroll: (state) => {
       state.syncScroll = !state.syncScroll;
     },
@@ -235,17 +292,16 @@ export const comparisonSlice = createSlice({
 });
 
 export const {
-  setPrompt,
   startComparison,
-  updateComparisonId,
+  confirmComparison,
   modelStarted,
-  appendChunk,
+  appendChunks,
   modelCompleted,
   modelError,
   addToolCall,
   resetModelForRetry,
   comparisonCompleted,
-  setComparisonFromHistory,
+  loadFromHistory,
   resetComparison,
   toggleSyncScroll,
 } = comparisonSlice.actions;

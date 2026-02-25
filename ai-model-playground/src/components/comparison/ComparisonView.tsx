@@ -1,19 +1,28 @@
-import { useState, useRef, useCallback } from 'react';
+import { memo, useState, useRef, useCallback } from 'react';
 import { ModelPanel } from '@/components/comparison/ModelPanel';
 import type { ModelStreamState } from '@/store/slices/comparisonSlice';
-import { ModelStatus } from '@/types/enums';
+import { allModelsDone } from '@/store/slices/comparisonSlice';
 
 interface ComparisonViewProps {
   models: Record<string, ModelStreamState>;
   currentPrompt?: string;
   syncScroll?: boolean;
+  /** (modelId) => void — stable callback from parent */
   onRetry?: (modelId: string) => void;
+  /** (modelId) => void — stable callback from parent */
   onRegenerate?: (modelId: string) => void;
   onEditPrompt?: (text: string) => void;
 }
 
 /** Presentational component — user message bubble + model response columns */
-export function ComparisonView({ models, currentPrompt, syncScroll = true, onRetry, onRegenerate, onEditPrompt }: ComparisonViewProps) {
+export const ComparisonView = memo(function ComparisonView({
+  models,
+  currentPrompt,
+  syncScroll = true,
+  onRetry,
+  onRegenerate,
+  onEditPrompt,
+}: ComparisonViewProps) {
   const modelEntries = Object.values(models);
   const [promptCopied, setPromptCopied] = useState(false);
   const scrollRefsMap = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -28,7 +37,8 @@ export function ComparisonView({ models, currentPrompt, syncScroll = true, onRet
   }, []);
 
   const handleSyncScroll = useCallback((sourceModelId: string) => {
-    if (!syncScroll || isSyncingRef.current) return;
+    // Only sync when toggle is on AND all models are done/error (not streaming)
+    if (!syncScroll || isSyncingRef.current || !allModelsDone(models)) return;
     const sourceEl = scrollRefsMap.current.get(sourceModelId);
     if (!sourceEl) return;
 
@@ -48,7 +58,7 @@ export function ComparisonView({ models, currentPrompt, syncScroll = true, onRet
     requestAnimationFrame(() => {
       isSyncingRef.current = false;
     });
-  }, [syncScroll]);
+  }, [syncScroll, models]);
 
   const handleCopyPrompt = async () => {
     if (!currentPrompt) return;
@@ -61,9 +71,16 @@ export function ComparisonView({ models, currentPrompt, syncScroll = true, onRet
     }
   };
 
+  // Retry / regenerate: already (modelId) => void — no turnId wrapping needed
+  const handleRetry = onRetry ?? (() => {});
+  const handleRegenerate = onRegenerate ?? (() => {});
+
   if (modelEntries.length === 0) {
     return null;
   }
+
+  // Derive a stable list of modelIds so the grid doesn't change identity
+  const modelIds = modelEntries.map((m) => m.modelId);
 
   return (
     <div className="space-y-6">
@@ -108,25 +125,62 @@ export function ComparisonView({ models, currentPrompt, syncScroll = true, onRet
 
       {/* Three model response columns */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {modelEntries.map((model) => (
-          <ModelPanel
-            key={model.modelId}
-            modelId={model.modelId}
-            provider={model.provider}
-            status={model.status}
-            responseText={model.responseText}
-            errorMessage={model.errorMessage}
-            errorCategory={model.errorCategory}
-            metrics={model.metrics}
-            finishReason={model.finishReason}
-            toolCalls={model.toolCalls}
-            onRetry={onRetry}
-            onRegenerate={onRegenerate}
-            scrollRef={(el) => registerScrollRef(model.modelId, el)}
-            onScroll={() => handleSyncScroll(model.modelId)}
+        {modelIds.map((modelId) => (
+          <StableModelPanel
+            key={modelId}
+            model={models[modelId]}
+            onRetry={handleRetry}
+            onRegenerate={handleRegenerate}
+            registerScrollRef={registerScrollRef}
+            handleSyncScroll={handleSyncScroll}
           />
         ))}
       </div>
     </div>
   );
+});
+
+// ─── Stable wrapper that prevents new function refs from breaking ModelPanel memo ──
+
+interface StableModelPanelProps {
+  model: ModelStreamState;
+  onRetry: (modelId: string) => void;
+  onRegenerate: (modelId: string) => void;
+  registerScrollRef: (modelId: string, el: HTMLDivElement | null) => void;
+  handleSyncScroll: (modelId: string) => void;
 }
+
+const StableModelPanel = memo(function StableModelPanel({
+  model,
+  onRetry,
+  onRegenerate,
+  registerScrollRef,
+  handleSyncScroll,
+}: StableModelPanelProps) {
+  const scrollRefCb = useCallback(
+    (el: HTMLDivElement | null) => registerScrollRef(model.modelId, el),
+    [registerScrollRef, model.modelId]
+  );
+  const onScrollCb = useCallback(
+    () => handleSyncScroll(model.modelId),
+    [handleSyncScroll, model.modelId]
+  );
+
+  return (
+    <ModelPanel
+      modelId={model.modelId}
+      provider={model.provider}
+      status={model.status}
+      responseText={model.responseText}
+      errorMessage={model.errorMessage}
+      errorCategory={model.errorCategory}
+      metrics={model.metrics}
+      finishReason={model.finishReason}
+      toolCalls={model.toolCalls}
+      onRetry={onRetry}
+      onRegenerate={onRegenerate}
+      scrollRef={scrollRefCb}
+      onScroll={onScrollCb}
+    />
+  );
+});
