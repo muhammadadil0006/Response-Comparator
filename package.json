@@ -8,8 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "lint:fix": "next lint --fix",
-    "postinstall": "prisma generate --no-engine",
-    "vercel-build": "prisma generate --no-engine && next build"
+    "postinstall": "prisma generate",
+    "vercel-build": "prisma generate && next build"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^1.0.0",
