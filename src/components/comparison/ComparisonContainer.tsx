@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useThrottledCallback } from 'use-debounce';
 import { useRouter } from 'next/navigation';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
 import { selectIsAuthenticated } from '@/store/slices/authSlice';
@@ -9,7 +10,6 @@ import {
   startComparison,
   updateComparisonId,
   modelStarted,
-  appendChunk,
   modelCompleted,
   modelError,
   addToolCall,
@@ -59,6 +59,18 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
   const initializedRef = useRef(false);
   const snapshotRestoredRef = useRef(false);
 
+  // ── Local streaming state ─────────────────────────────────────────────────
+  // Chunks never enter Redux during streaming.  The ref holds the growing text
+  // per model; a throttled flush copies it to React state every ~50 ms so
+  // panels re-render at a comfortable 20 fps without blocking the main thread.
+  const streamingTextsRef = useRef<Record<string, string>>({});
+  const [streamingTexts, setStreamingTexts] = useState<Record<string, string>>({});
+  const flushStreamingDisplay = useThrottledCallback(
+    () => { setStreamingTexts({ ...streamingTextsRef.current }); },
+    50,
+    { leading: false, trailing: true }
+  );
+
   // ── Persist in-flight state to localStorage on every models change ───────────
   // This is more reliable than beforeunload (which can be skipped by browsers).
   useEffect(() => {
@@ -75,9 +87,17 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
     }
     if (hasInFlight) {
       try {
+        // Merge local streaming text into models for the snapshot so that
+        // a page refresh during streaming preserves partial responses.
+        const modelsForSnapshot = Object.fromEntries(
+          Object.entries(models).map(([id, m]) => [
+            id,
+            streamingTexts[id] ? { ...m, responseText: streamingTexts[id] } : m,
+          ])
+        );
         localStorage.setItem(
           'comparison_snapshot',
-          JSON.stringify({ comparisonId: currentComparisonId, currentPrompt, models })
+          JSON.stringify({ comparisonId: currentComparisonId, currentPrompt, models: modelsForSnapshot })
         );
       } catch {
         // quota exceeded — ignore
@@ -86,7 +106,7 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
       // All models completed/errored — clear the snapshot
       localStorage.removeItem('comparison_snapshot');
     }
-  }, [models, currentPrompt, currentComparisonId]);
+  }, [models, currentPrompt, currentComparisonId, streamingTexts]);
 
   // ── Restore snapshot on mount (runs before history query can overwrite) ──────
   useEffect(() => {
@@ -256,10 +276,22 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
       // Abort any in-flight request before starting a new one.
       // For single-model retries, keep the original stream alive so other
       // panels continue rendering; only abort on full new-prompt submissions.
+      //
+      // Also clear local streaming state appropriately.
       if (!options?.isRetry) {
+        streamingTextsRef.current = {};
+        setStreamingTexts({});
         if (abortControllerRef.current) {
           abortControllerRef.current.abort('superseded');
         }
+      } else {
+        // Clear only the retried model's buffer
+        selectedModels.forEach((mid) => { delete streamingTextsRef.current[mid]; });
+        setStreamingTexts((prev) => {
+          const next = { ...prev };
+          selectedModels.forEach((mid) => delete next[mid]);
+          return next;
+        });
       }
       const abortController = new AbortController();
       if (!options?.isRetry) {
@@ -388,24 +420,23 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
                       })
                     );
                     break;
-                  case SSEEventType.MODEL_CHUNK:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
+                  case SSEEventType.MODEL_CHUNK: {
+                    const chunkModelId = data.modelId!;
+                    modelAccumulator[chunkModelId] = {
+                      ...(modelAccumulator[chunkModelId] || {
+                        provider: getProviderForModel(chunkModelId),
                         responseText: '',
                         status: ModelStatus.IDLE,
                       }),
                       responseText:
-                        (modelAccumulator[data.modelId!]?.responseText || '') + data.chunk!,
+                        (modelAccumulator[chunkModelId]?.responseText || '') + data.chunk!,
                       status: ModelStatus.STREAMING,
                     };
-                    dispatch(
-                      appendChunk({
-                        modelId: data.modelId!,
-                        chunk: data.chunk!,
-                      })
-                    );
+                    // Buffer in local ref — no Redux dispatch until stream ends.
+                    streamingTextsRef.current[chunkModelId] = modelAccumulator[chunkModelId].responseText;
+                    flushStreamingDisplay();
                     break;
+                  }
                   case SSEEventType.MODEL_TOOL_CALL:
                     if (data.toolCall) {
                       dispatch(
@@ -416,48 +447,74 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
                       );
                     }
                     break;
-                  case SSEEventType.MODEL_COMPLETED:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
-                        responseText: '',
+                  case SSEEventType.MODEL_COMPLETED: {
+                    const completedModelId = data.modelId!;
+                    const completedText = modelAccumulator[completedModelId]?.responseText || '';
+                    modelAccumulator[completedModelId] = {
+                      ...(modelAccumulator[completedModelId] || {
+                        provider: getProviderForModel(completedModelId),
+                        responseText: completedText,
                         status: ModelStatus.IDLE,
                       }),
+                      responseText: completedText,
                       status: ModelStatus.COMPLETED,
                       metrics: data.metrics,
                     };
+                    // Remove from local streaming state — Redux responseText takes over.
+                    delete streamingTextsRef.current[completedModelId];
+                    setStreamingTexts((prev) => {
+                      const next = { ...prev };
+                      delete next[completedModelId];
+                      return next;
+                    });
                     dispatch(
                       modelCompleted({
-                        modelId: data.modelId!,
+                        modelId: completedModelId,
+                        responseText: completedText,
                         metrics: data.metrics ?? null,
                         finishReason: data.finishReason,
                       })
                     );
                     break;
-                  case SSEEventType.MODEL_ERROR:
-                    modelAccumulator[data.modelId!] = {
-                      ...(modelAccumulator[data.modelId!] || {
-                        provider: getProviderForModel(data.modelId!),
-                        responseText: '',
+                  }
+                  case SSEEventType.MODEL_ERROR: {
+                    const errorModelId = data.modelId!;
+                    const partialTextOnError = modelAccumulator[errorModelId]?.responseText || '';
+                    modelAccumulator[errorModelId] = {
+                      ...(modelAccumulator[errorModelId] || {
+                        provider: getProviderForModel(errorModelId),
+                        responseText: partialTextOnError,
                         status: ModelStatus.IDLE,
                       }),
                       status: ModelStatus.ERROR,
                       errorMessage: extractErrorMessage(data.error, 'Unexpected error'),
                     };
+                    delete streamingTextsRef.current[errorModelId];
+                    setStreamingTexts((prev) => {
+                      const next = { ...prev };
+                      delete next[errorModelId];
+                      return next;
+                    });
                     dispatch(
                       modelError({
-                        modelId: data.modelId!,
+                        modelId: errorModelId,
+                        responseText: partialTextOnError,
                         error: extractErrorMessage(data.error, 'Unexpected error'),
                         category: data.category,
                       })
                     );
                     break;
+                  }
                   case SSEEventType.ERROR:
+                    // Clear all local streaming state on a global stream error.
+                    streamingTextsRef.current = {};
+                    setStreamingTexts({});
                     selectedModels.forEach((modelId) => {
+                      const partialOnGlobalErr = modelAccumulator[modelId]?.responseText || '';
                       modelAccumulator[modelId] = {
                         ...(modelAccumulator[modelId] || {
                           provider: getProviderForModel(modelId),
-                          responseText: '',
+                          responseText: partialOnGlobalErr,
                           status: ModelStatus.IDLE,
                         }),
                         status: ModelStatus.ERROR,
@@ -467,6 +524,7 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
                       dispatch(
                         modelError({
                           modelId,
+                          responseText: partialOnGlobalErr,
                           error: extractErrorMessage(
                             data,
                             'Failed to complete comparison'
@@ -490,11 +548,15 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
           wasSuperseded = true;
         } else {
           console.error('Comparison error:', error);
+          // Clear local streaming state on network/unexpected errors.
+          streamingTextsRef.current = {};
+          setStreamingTexts({});
           selectedModels.forEach((modelId) => {
+            const partialOnNetErr = modelAccumulator[modelId]?.responseText || '';
             modelAccumulator[modelId] = {
               ...(modelAccumulator[modelId] || {
                 provider: getProviderForModel(modelId),
-                responseText: '',
+                responseText: partialOnNetErr,
                 status: ModelStatus.IDLE,
               }),
               status: ModelStatus.ERROR,
@@ -504,6 +566,7 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
             dispatch(
               modelError({
                 modelId,
+                responseText: partialOnNetErr,
                 error: extractErrorMessage(error, 'Failed to connect to server'),
               })
             );
@@ -773,8 +836,8 @@ export function ComparisonContainer({ initialComparisonId }: ComparisonContainer
               models={models}
               currentPrompt={currentPrompt}
               syncScroll={syncScroll}
+              streamingTexts={streamingTexts}
               onRetry={handleRetry}
-              onRegenerate={handleRetry}
               onEditPrompt={handleEditPrompt}
             />
           </div>

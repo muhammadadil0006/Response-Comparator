@@ -24,13 +24,14 @@ interface ModelPanelProps {
   provider: string;
   status: ModelStatus;
   responseText: string;
+  /** Live text fed from the local ref buffer while streaming. Absent after completion. */
+  streamingText?: string;
   errorMessage?: string;
   errorCategory?: string;
   metrics: ModelMetrics | null;
   finishReason?: string;
   toolCalls?: ToolCallData[];
   onRetry?: (modelId: string) => void;
-  onRegenerate?: (modelId: string) => void;
   scrollRef?: (el: HTMLDivElement | null) => void;
   onScroll?: () => void;
 }
@@ -40,13 +41,13 @@ export const ModelPanel = memo(function ModelPanel({
   provider,
   status,
   responseText,
+  streamingText,
   errorMessage,
   errorCategory,
   metrics,
   finishReason,
   toolCalls,
   onRetry,
-  onRegenerate,
   scrollRef,
   onScroll,
 }: ModelPanelProps) {
@@ -55,11 +56,14 @@ export const ModelPanel = memo(function ModelPanel({
   const providerName = PROVIDER_DISPLAY_NAMES[provider] || provider;
   const providerColor = PROVIDER_COLORS[provider] || '#6b7280';
 
-  const handleCopy = async () => {
-    if (!responseText?.trim()) return;
+  // During streaming, show live text from local buffer.
+  // After completion, show the finalized Redux responseText.
+  const displayText = status === ModelStatus.STREAMING ? (streamingText ?? '') : responseText;
 
+  const handleCopy = async () => {
+    if (!displayText?.trim()) return;
     try {
-      await navigator.clipboard.writeText(responseText);
+      await navigator.clipboard.writeText(displayText);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     } catch {
@@ -116,7 +120,7 @@ export const ModelPanel = memo(function ModelPanel({
 
         {(status === ModelStatus.STREAMING || status === ModelStatus.COMPLETED) && (
           <StreamingResponse
-            text={responseText}
+            text={displayText}
             isStreaming={status === ModelStatus.STREAMING}
             provider={provider}
             toolCalls={toolCalls}
@@ -138,7 +142,7 @@ export const ModelPanel = memo(function ModelPanel({
         )}
 
         {status === ModelStatus.INTERRUPTED && (
-          responseText ? (
+          displayText ? (
             <>
               <div className="mx-2 mt-2 mb-1 flex items-center gap-1.5 rounded-lg border border-yellow-500/20 bg-yellow-500/10 px-3 py-2">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5 shrink-0 text-yellow-400">
@@ -147,7 +151,7 @@ export const ModelPanel = memo(function ModelPanel({
                 <span className="text-xs text-yellow-400">Interrupted — partial response shown below</span>
               </div>
               <StreamingResponse
-                text={responseText}
+                text={displayText}
                 isStreaming={false}
                 provider={provider}
                 toolCalls={toolCalls}
@@ -178,7 +182,7 @@ export const ModelPanel = memo(function ModelPanel({
               onClick={handleCopy}
               title="Copy response"
               className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[#8B949E] transition-colors hover:bg-[#1C2128] hover:text-[#F0F6FC]"
-              disabled={!responseText?.trim()}
+              disabled={!displayText?.trim()}
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
                 <path d="M7 3.5A1.5 1.5 0 0 1 8.5 2h3.879a1.5 1.5 0 0 1 1.06.44l3.122 3.12A1.5 1.5 0 0 1 17 6.622V12.5a1.5 1.5 0 0 1-1.5 1.5h-1v-3.379a3 3 0 0 0-.879-2.121L10.5 5.379A3 3 0 0 0 8.379 4.5H7v-1Z" />
@@ -186,21 +190,7 @@ export const ModelPanel = memo(function ModelPanel({
               </svg>
               {copied ? 'Copied!' : 'Copy'}
             </button>
-            {onRegenerate && (status === ModelStatus.COMPLETED || status === ModelStatus.INTERRUPTED) && (
-              <button
-                type="button"
-                onClick={() => onRegenerate(modelId)}
-                title="Regenerate response"
-                className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors hover:bg-[#1C2128] hover:text-[#F0F6FC] ${
-                  status === ModelStatus.INTERRUPTED ? 'text-yellow-400' : 'text-[#8B949E]'
-                }`}
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
-                  <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.433a.75.75 0 0 0 0-1.5H4.598a.75.75 0 0 0-.75.75v3.634a.75.75 0 0 0 1.5 0v-2.033l.312.311a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm-10.624-2.85a5.5 5.5 0 0 1 9.201-2.465l.312.31H11.768a.75.75 0 0 0 0 1.5h3.634a.75.75 0 0 0 .75-.75V3.534a.75.75 0 0 0-1.5 0v2.033l-.312-.311A7 7 0 0 0 2.64 8.395a.75.75 0 0 0 1.448.39Z" clipRule="evenodd" />
-                </svg>
-                {status === ModelStatus.INTERRUPTED ? 'Regenerate ↺' : 'Regenerate'}
-              </button>
-            )}
+
           </div>
         )}
         <MetricsDisplay metrics={metrics} status={status} />
