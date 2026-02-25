@@ -7,13 +7,14 @@ interface ComparisonViewProps {
   models: Record<string, ModelStreamState>;
   currentPrompt?: string;
   syncScroll?: boolean;
+  /** Live streaming text keyed by modelId — updated every ~50 ms during streaming. */
+  streamingTexts?: Record<string, string>;
   onRetry?: (modelId: string) => void;
-  onRegenerate?: (modelId: string) => void;
   onEditPrompt?: (text: string) => void;
 }
 
 /** Presentational component — user message bubble + model response columns */
-export function ComparisonView({ models, currentPrompt, syncScroll = true, onRetry, onRegenerate, onEditPrompt }: ComparisonViewProps) {
+export function ComparisonView({ models, currentPrompt, syncScroll = true, streamingTexts, onRetry, onEditPrompt }: ComparisonViewProps) {
   const modelEntries = Object.values(models);
   const [promptCopied, setPromptCopied] = useState(false);
   const scrollRefsMap = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -115,13 +116,13 @@ export function ComparisonView({ models, currentPrompt, syncScroll = true, onRet
             provider={model.provider}
             status={model.status}
             responseText={model.responseText}
+            streamingText={streamingTexts?.[model.modelId]}
             errorMessage={model.errorMessage}
             errorCategory={model.errorCategory}
             metrics={model.metrics}
             finishReason={model.finishReason}
             toolCalls={model.toolCalls}
             onRetry={onRetry}
-            onRegenerate={onRegenerate}
             scrollRef={(el) => registerScrollRef(model.modelId, el)}
             onScroll={() => handleSyncScroll(model.modelId)}
           />

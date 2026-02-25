@@ -7,6 +7,10 @@ export interface ModelStreamState {
   modelId: string;
   provider: string;
   status: ModelStatus;
+  /**
+   * Accumulated response text. Set incrementally by modelCompleted/modelError.
+   * During streaming, live text lives in component-local state (not Redux).
+   */
   responseText: string;
   errorMessage?: string;
   errorCategory?: 'rate-limit' | 'capability' | 'auth' | 'not-found' | 'timeout' | 'content-filter' | 'server' | 'unknown';
@@ -98,41 +102,30 @@ export const comparisonSlice = createSlice({
         state.models[modelId].provider = provider;
       }
     },
-    appendChunk: (
-      state,
-      action: PayloadAction<{ modelId: string; chunk: string }>
-    ) => {
-      const { modelId, chunk } = action.payload;
-      if (!state.models[modelId]) {
-        state.models[modelId] = {
-          modelId,
-          provider: '',
-          status: ModelStatus.STREAMING,
-          responseText: chunk,
-          metrics: null,
-        };
-      } else {
-        state.models[modelId].responseText += chunk;
-      }
-    },
+
     modelCompleted: (
       state,
       action: PayloadAction<{
         modelId: string;
         metrics: ModelStreamState['metrics'];
         finishReason?: string;
+        /** Full accumulated response text from local streaming buffer. */
+        responseText?: string;
       }>
     ) => {
-      const { modelId, metrics, finishReason } = action.payload;
+      const { modelId, metrics, finishReason, responseText } = action.payload;
       if (!state.models[modelId]) {
         state.models[modelId] = {
           modelId,
           provider: '',
           status: ModelStatus.COMPLETED,
-          responseText: '',
+          responseText: responseText ?? '',
           metrics: metrics,
         };
       } else {
+        if (responseText !== undefined) {
+          state.models[modelId].responseText = responseText;
+        }
         state.models[modelId].status = ModelStatus.COMPLETED;
         state.models[modelId].metrics = metrics;
       }
@@ -142,20 +135,24 @@ export const comparisonSlice = createSlice({
     },
     modelError: (
       state,
-      action: PayloadAction<{ modelId: string; error: string; category?: string }>
+      action: PayloadAction<{ modelId: string; error: string; category?: string; responseText?: string }>
     ) => {
-      const { modelId, error, category } = action.payload;
+      const { modelId, error, category, responseText } = action.payload;
       if (!state.models[modelId]) {
         state.models[modelId] = {
           modelId,
           provider: '',
           status: ModelStatus.ERROR,
-          responseText: '',
+          responseText: responseText ?? '',
           errorMessage: error,
           errorCategory: (category as ModelStreamState['errorCategory']) || 'unknown',
           metrics: null,
         };
       } else {
+        // Preserve any partial text that streamed before the error.
+        if (responseText !== undefined) {
+          state.models[modelId].responseText = responseText;
+        }
         state.models[modelId].status = ModelStatus.ERROR;
         state.models[modelId].errorMessage = error;
         state.models[modelId].errorCategory = (category as ModelStreamState['errorCategory']) || 'unknown';
@@ -266,7 +263,6 @@ export const {
   startComparison,
   updateComparisonId,
   modelStarted,
-  appendChunk,
   modelCompleted,
   modelError,
   addToolCall,
