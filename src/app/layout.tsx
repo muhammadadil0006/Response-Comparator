@@ -8,6 +8,9 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'AI Model Playground',
   description: 'Compare AI models side by side — GPT-4o, Claude 3 Sonnet, and Grok 2',
+  verification: {
+    google: 'IU6uw09liqhrbJGvel0Xgf1PiCGijbnOmuUc1UNKy-k',
+  },
 };
 
 export default function RootLayout({
