@@ -7,7 +7,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'AI Model Playground',
-  description: 'Compare AI models side by side — GPT-4o, Claude 3 Sonnet, and Grok 2',
+  description: 'Compare AI responses side-by-side with our free Response Comparator tool. Evaluate ChatGPT, Claude, Gemini, and more in seconds. Try it free today.',
   verification: {
     google: 'IU6uw09liqhrbJGvel0Xgf1PiCGijbnOmuUc1UNKy-k',
   },
